@@ -2,24 +2,30 @@
 //
 // What is public on the ledger:
 //   - the employer and auditor public keys (hashes of their secret keys)
+//   - a hiding commitment to the employer's salary rules (bands per level)
 //   - one record per payslip: employee public key, period, a hiding commitment
 //     to the figures, and whether the employee has claimed it
+//   - a hiding commitment to each period's running net total, and the total
+//     itself once the period is closed
 //   - a running hash of every commitment issued per period, anchored on Cardano
 //   - the aggregate budget minted per period as the shielded pay token
 //
 // What stays private:
-//   - every salary figure (base, allowance, bonus, deductions, net)
+//   - every salary figure and each employee's level
+//   - the salary rules themselves
 //   - the secret keys of all parties
 //   - which shielded coins went to which employee (paid wallet-to-wallet)
 //
-// The issuePayslip proof guarantees the deductions and net pay follow the
-// statutory rates below, without revealing any of the amounts.
+// The issuePayslip proof guarantees, without revealing any amount, that the
+// figures fall inside the band of the employee's level, that the statutory
+// deductions are correct, and that the period total was updated consistently.
 
 pragma language_version 0.23;
 
 import CompactStandardLibrary;
 
 export struct PayslipDetails {
+  level: Uint<8>;
   base: Uint<64>;
   allowance: Uint<64>;
   bonus: Uint<64>;
@@ -31,6 +37,24 @@ export struct PayslipDetails {
 
 export struct PayslipOpening {
   details: PayslipDetails;
+  salt: Bytes<32>;
+}
+
+export struct SalaryBand {
+  minBase: Uint<64>;
+  maxBase: Uint<64>;
+  maxAllowance: Uint<64>;
+  maxBonus: Uint<64>;
+}
+
+// Bands for levels 1..5.
+export struct SalaryRules {
+  bands: Vector<5, SalaryBand>;
+  salt: Bytes<32>;
+}
+
+export struct TotalOpening {
+  total: Uint<64>;
   salt: Bytes<32>;
 }
 
@@ -46,12 +70,19 @@ export struct PayslipRecord {
 export sealed ledger employer: Bytes<32>;
 export sealed ledger auditor: Bytes<32>;
 
+export ledger rulesCommitment: Bytes<32>;
+export ledger rulesVersion: Counter;
+
 // payslipId(employee, period) -> record
 export ledger payslips: Map<Bytes<32>, PayslipRecord>;
 // period -> hash chain over every commitment issued in that period
 export ledger periodRoots: Map<Uint<32>, Bytes<32>>;
 // period -> number of payslips issued (re-issues included)
 export ledger periodIssued: Map<Uint<32>, Uint<32>>;
+// period -> commitment to the running total of net pay
+export ledger periodTotals: Map<Uint<32>, Bytes<32>>;
+// period -> disclosed total, once closed
+export ledger periodClosed: Map<Uint<32>, Uint<64>>;
 // period -> shielded pay tokens minted to the employer for that period
 export ledger periodBudgets: Map<Uint<32>, Uint<64>>;
 // period -> auditor sign-off
@@ -62,6 +93,14 @@ export ledger mintCount: Counter;
 witness localSecretKey(): Bytes<32>;
 // Opening of the payslip being issued or claimed, held in the caller's private state.
 witness payslipOpening(id: Bytes<32>): PayslipOpening;
+// Opening of the payslip being replaced on re-issue (all zero when there is none).
+witness replacedOpening(id: Bytes<32>): PayslipOpening;
+// The employer's salary rules.
+witness salaryRules(): SalaryRules;
+// Opening of the period's current total (zero when nothing was issued yet).
+witness periodTotal(period: Uint<32>): TotalOpening;
+// Fresh salt for the period's next total commitment.
+witness nextTotalSalt(period: Uint<32>): Bytes<32>;
 
 constructor(auditorPk: Bytes<32>) {
   employer = disclose(publicKey(localSecretKey()));
@@ -83,6 +122,36 @@ circuit assertValidCalculation(d: PayslipDetails): [] {
   assert(d.net + d.labor + d.health + d.tax == gross, "Net pay does not equal gross minus deductions");
 }
 
+circuit bandFor(rules: SalaryRules, level: Uint<8>): SalaryBand {
+  assert(level >= 1 && level <= 5, "Unknown level");
+  return level == 1 ? rules.bands[0]
+       : level == 2 ? rules.bands[1]
+       : level == 3 ? rules.bands[2]
+       : level == 4 ? rules.bands[3]
+       : rules.bands[4];
+}
+
+circuit assertWithinRules(d: PayslipDetails): [] {
+  const rules = salaryRules();
+  assert(rulesCommitment != default<Bytes<32>>, "Salary rules not published");
+  assert(salaryRulesCommitment(rules) == rulesCommitment, "Salary rules do not match the published commitment");
+  const band = bandFor(rules, d.level);
+  assert(d.base >= band.minBase && d.base <= band.maxBase, "Base salary is outside the band for this level");
+  assert(d.allowance <= band.maxAllowance, "Allowance exceeds the band for this level");
+  assert(d.bonus <= band.maxBonus, "Bonus exceeds the band for this level");
+}
+
+// Returns the period's current total after checking it against the ledger.
+circuit currentTotal(p: Uint<32>): Uint<64> {
+  const opening = periodTotal(p);
+  if (periodTotals.member(p)) {
+    assert(totalCommitment(opening) == periodTotals.lookup(p), "Period total opening does not match");
+  } else {
+    assert(opening.total == 0, "Period has no total yet");
+  }
+  return opening.total;
+}
+
 circuit assertEmployer(): [] {
   assert(publicKey(localSecretKey()) == employer, "Caller is not the employer");
 }
@@ -99,8 +168,23 @@ export pure circuit payslipCommitment(opening: PayslipOpening): Bytes<32> {
   return persistentCommit<PayslipDetails>(opening.details, opening.salt);
 }
 
+export pure circuit salaryRulesCommitment(rules: SalaryRules): Bytes<32> {
+  return persistentCommit<Vector<5, SalaryBand>>(rules.bands, rules.salt);
+}
+
+export pure circuit totalCommitment(opening: TotalOpening): Bytes<32> {
+  return persistentCommit<Uint<64>>(opening.total, opening.salt);
+}
+
 export pure circuit payTokenDomain(): Bytes<32> {
   return pad(32, "payroll:pTWD");
+}
+
+// Employer publishes (or replaces) a commitment to the salary rules.
+export circuit setSalaryRules(): [] {
+  assertEmployer();
+  rulesCommitment = disclose(salaryRulesCommitment(salaryRules()));
+  rulesVersion.increment(1);
 }
 
 // Employer mints the period's payroll budget as shielded pay tokens to its own
@@ -117,17 +201,32 @@ export circuit fundPeriod(period: Uint<32>, budget: Uint<64>): [] {
 }
 
 // Employer publishes a payslip. The proof shows the hidden figures satisfy the
-// payroll rules and match the published commitment.
+// salary rules and statutory deductions, match the published commitment, and
+// update the period's hidden running total.
 export circuit issuePayslip(employee: Bytes<32>, period: Uint<32>): [] {
   assertEmployer();
   const emp = disclose(employee);
   const p = disclose(period);
+  assert(!periodClosed.member(p), "Period already closed");
   const id = payslipId(emp, p);
-  if (payslips.member(id)) {
-    assert(payslips.lookup(id).status == PayslipStatus.issued, "Payslip already claimed");
-  }
+
   const opening = payslipOpening(id);
   assertValidCalculation(opening.details);
+  assertWithinRules(opening.details);
+
+  // A pending payslip may be re-issued; its old net comes out of the total.
+  const replaced = replacedOpening(id);
+  const exists = payslips.member(id);
+  if (exists) {
+    const previous = payslips.lookup(id);
+    assert(previous.status == PayslipStatus.issued, "Payslip already claimed");
+    assert(payslipCommitment(replaced) == previous.commitment, "Replaced opening does not match");
+  } else {
+    assert(replaced.details.net == 0, "Nothing to replace");
+  }
+  const total = (currentTotal(p) + opening.details.net - replaced.details.net) as Uint<64>;
+  periodTotals.insert(p, disclose(totalCommitment(TotalOpening { total: total, salt: nextTotalSalt(p) })));
+
   const commitment = disclose(payslipCommitment(opening));
   payslips.insert(id, PayslipRecord { employee: emp, period: p, commitment: commitment, status: PayslipStatus.issued });
 
@@ -149,10 +248,23 @@ export circuit claimPayslip(period: Uint<32>): [] {
   payslips.insert(id, PayslipRecord { ...record, status: PayslipStatus.claimed });
 }
 
-// Auditor signs off on a period after reviewing the disclosed payslips.
+// Employer closes the period: proves the hidden total stays within the funded
+// budget and discloses only the aggregate.
+export circuit closePeriod(period: Uint<32>): [] {
+  assertEmployer();
+  const p = disclose(period);
+  assert(!periodClosed.member(p), "Period already closed");
+  assert(periodTotals.member(p), "Nothing issued for this period");
+  assert(periodBudgets.member(p), "Period not funded");
+  const total = currentTotal(p);
+  assert(total <= periodBudgets.lookup(p), "Total payroll exceeds the funded budget");
+  periodClosed.insert(p, disclose(total));
+}
+
+// Auditor signs off on a closed period after reviewing the disclosed payslips.
 export circuit attestPeriod(period: Uint<32>): [] {
   assert(publicKey(localSecretKey()) == auditor, "Caller is not the auditor");
   const p = disclose(period);
-  assert(periodIssued.member(p), "Nothing issued for this period");
+  assert(periodClosed.member(p), "Period is not closed yet");
   auditedPeriods.insert(p);
 }

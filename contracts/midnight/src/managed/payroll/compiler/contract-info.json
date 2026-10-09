@@ -64,6 +64,13 @@
                   "name": "PayslipDetails",
                   "elements": [
                     {
+                      "name": "level",
+                      "type": {
+                        "type-name": "Uint",
+                        "maxval": 255
+                      }
+                    },
+                    {
                       "name": "base",
                       "type": {
                         "type-name": "Uint",
@@ -132,6 +139,108 @@
       }
     },
     {
+      "name": "salaryRulesCommitment",
+      "pure": true,
+      "proof": false,
+      "arguments": [
+        {
+          "name": "rules",
+          "type": {
+            "type-name": "Struct",
+            "name": "SalaryRules",
+            "elements": [
+              {
+                "name": "bands",
+                "type": {
+                  "type-name": "Vector",
+                  "length": 5,
+                  "type": {
+                    "type-name": "Struct",
+                    "name": "SalaryBand",
+                    "elements": [
+                      {
+                        "name": "minBase",
+                        "type": {
+                          "type-name": "Uint",
+                          "maxval": 18446744073709551615
+                        }
+                      },
+                      {
+                        "name": "maxBase",
+                        "type": {
+                          "type-name": "Uint",
+                          "maxval": 18446744073709551615
+                        }
+                      },
+                      {
+                        "name": "maxAllowance",
+                        "type": {
+                          "type-name": "Uint",
+                          "maxval": 18446744073709551615
+                        }
+                      },
+                      {
+                        "name": "maxBonus",
+                        "type": {
+                          "type-name": "Uint",
+                          "maxval": 18446744073709551615
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "salt",
+                "type": {
+                  "type-name": "Bytes",
+                  "length": 32
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    },
+    {
+      "name": "totalCommitment",
+      "pure": true,
+      "proof": false,
+      "arguments": [
+        {
+          "name": "opening",
+          "type": {
+            "type-name": "Struct",
+            "name": "TotalOpening",
+            "elements": [
+              {
+                "name": "total",
+                "type": {
+                  "type-name": "Uint",
+                  "maxval": 18446744073709551615
+                }
+              },
+              {
+                "name": "salt",
+                "type": {
+                  "type-name": "Bytes",
+                  "length": 32
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    },
+    {
       "name": "payTokenDomain",
       "pure": true,
       "proof": false,
@@ -140,6 +249,18 @@
       "result-type": {
         "type-name": "Bytes",
         "length": 32
+      }
+    },
+    {
+      "name": "setSalaryRules",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
       }
     },
     {
@@ -214,6 +335,25 @@
       }
     },
     {
+      "name": "closePeriod",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "period",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 4294967295
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
       "name": "attestPeriod",
       "pure": false,
       "proof": true,
@@ -264,6 +404,13 @@
               "type-name": "Struct",
               "name": "PayslipDetails",
               "elements": [
+                {
+                  "name": "level",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 255
+                  }
+                },
                 {
                   "name": "base",
                   "type": {
@@ -325,6 +472,203 @@
           }
         ]
       }
+    },
+    {
+      "name": "replacedOpening",
+      "arguments": [
+        {
+          "name": "id",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        }
+      ],
+      "result type": {
+        "type-name": "Struct",
+        "name": "PayslipOpening",
+        "elements": [
+          {
+            "name": "details",
+            "type": {
+              "type-name": "Struct",
+              "name": "PayslipDetails",
+              "elements": [
+                {
+                  "name": "level",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 255
+                  }
+                },
+                {
+                  "name": "base",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 18446744073709551615
+                  }
+                },
+                {
+                  "name": "allowance",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 18446744073709551615
+                  }
+                },
+                {
+                  "name": "bonus",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 18446744073709551615
+                  }
+                },
+                {
+                  "name": "labor",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 18446744073709551615
+                  }
+                },
+                {
+                  "name": "health",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 18446744073709551615
+                  }
+                },
+                {
+                  "name": "tax",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 18446744073709551615
+                  }
+                },
+                {
+                  "name": "net",
+                  "type": {
+                    "type-name": "Uint",
+                    "maxval": 18446744073709551615
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "salt",
+            "type": {
+              "type-name": "Bytes",
+              "length": 32
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "salaryRules",
+      "arguments": [
+      ],
+      "result type": {
+        "type-name": "Struct",
+        "name": "SalaryRules",
+        "elements": [
+          {
+            "name": "bands",
+            "type": {
+              "type-name": "Vector",
+              "length": 5,
+              "type": {
+                "type-name": "Struct",
+                "name": "SalaryBand",
+                "elements": [
+                  {
+                    "name": "minBase",
+                    "type": {
+                      "type-name": "Uint",
+                      "maxval": 18446744073709551615
+                    }
+                  },
+                  {
+                    "name": "maxBase",
+                    "type": {
+                      "type-name": "Uint",
+                      "maxval": 18446744073709551615
+                    }
+                  },
+                  {
+                    "name": "maxAllowance",
+                    "type": {
+                      "type-name": "Uint",
+                      "maxval": 18446744073709551615
+                    }
+                  },
+                  {
+                    "name": "maxBonus",
+                    "type": {
+                      "type-name": "Uint",
+                      "maxval": 18446744073709551615
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "name": "salt",
+            "type": {
+              "type-name": "Bytes",
+              "length": 32
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "periodTotal",
+      "arguments": [
+        {
+          "name": "period",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 4294967295
+          }
+        }
+      ],
+      "result type": {
+        "type-name": "Struct",
+        "name": "TotalOpening",
+        "elements": [
+          {
+            "name": "total",
+            "type": {
+              "type-name": "Uint",
+              "maxval": 18446744073709551615
+            }
+          },
+          {
+            "name": "salt",
+            "type": {
+              "type-name": "Bytes",
+              "length": 32
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "nextTotalSalt",
+      "arguments": [
+        {
+          "name": "period",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 4294967295
+          }
+        }
+      ],
+      "result type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
     }
   ],
   "contracts": [
@@ -351,8 +695,24 @@
       }
     },
     {
-      "name": "payslips",
+      "name": "rulesCommitment",
       "index": 2,
+      "exported": true,
+      "storage": "Cell",
+      "type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    },
+    {
+      "name": "rulesVersion",
+      "index": 3,
+      "exported": true,
+      "storage": "Counter"
+    },
+    {
+      "name": "payslips",
+      "index": 4,
       "exported": true,
       "storage": "Map",
       "key": {
@@ -400,7 +760,7 @@
     },
     {
       "name": "periodRoots",
-      "index": 3,
+      "index": 5,
       "exported": true,
       "storage": "Map",
       "key": {
@@ -414,7 +774,7 @@
     },
     {
       "name": "periodIssued",
-      "index": 4,
+      "index": 6,
       "exported": true,
       "storage": "Map",
       "key": {
@@ -427,8 +787,36 @@
       }
     },
     {
+      "name": "periodTotals",
+      "index": 7,
+      "exported": true,
+      "storage": "Map",
+      "key": {
+        "type-name": "Uint",
+        "maxval": 4294967295
+      },
+      "value": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    },
+    {
+      "name": "periodClosed",
+      "index": 8,
+      "exported": true,
+      "storage": "Map",
+      "key": {
+        "type-name": "Uint",
+        "maxval": 4294967295
+      },
+      "value": {
+        "type-name": "Uint",
+        "maxval": 18446744073709551615
+      }
+    },
+    {
       "name": "periodBudgets",
-      "index": 5,
+      "index": 9,
       "exported": true,
       "storage": "Map",
       "key": {
@@ -442,7 +830,7 @@
     },
     {
       "name": "auditedPeriods",
-      "index": 6,
+      "index": 10,
       "exported": true,
       "storage": "Set",
       "type": {
@@ -452,7 +840,7 @@
     },
     {
       "name": "mintCount",
-      "index": 7,
+      "index": 11,
       "exported": true,
       "storage": "Counter"
     }

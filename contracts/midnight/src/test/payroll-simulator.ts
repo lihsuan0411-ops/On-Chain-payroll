@@ -6,6 +6,8 @@ import {
 } from '@midnight-ntwrk/compact-runtime';
 import { Contract, type Ledger, ledger, pureCircuits, type PayslipOpening } from '../managed/payroll/contract/index.js';
 import { type PayrollPrivateState, createPayrollPrivateState, withOpening, witnesses } from '../witnesses';
+import { createEmployerBook, prepareClose, prepareIssue, prepareSetRules, type EmployerBook } from '../employer-book';
+import { createSalaryRules } from '../payroll-math';
 
 const COIN_PK = '0'.repeat(64);
 
@@ -13,18 +15,18 @@ const COIN_PK = '0'.repeat(64);
 export class PayrollSimulator {
   readonly contract = new Contract<PayrollPrivateState>(witnesses);
   context: CircuitContext<PayrollPrivateState>;
+  book: EmployerBook;
 
-  constructor(employerSk: Uint8Array, auditorPk: Uint8Array) {
+  constructor(
+    readonly employerSk: Uint8Array,
+    auditorPk: Uint8Array,
+  ) {
     const { currentPrivateState, currentContractState, currentZswapLocalState } = this.contract.initialState(
       createConstructorContext(createPayrollPrivateState(employerSk), COIN_PK),
       auditorPk,
     );
-    this.context = createCircuitContext(
-      sampleContractAddress(),
-      currentZswapLocalState,
-      currentContractState,
-      currentPrivateState,
-    );
+    this.context = createCircuitContext(sampleContractAddress(), currentZswapLocalState, currentContractState, currentPrivateState);
+    this.book = createEmployerBook(createSalaryRules());
   }
 
   as(state: PayrollPrivateState): this {
@@ -32,32 +34,40 @@ export class PayrollSimulator {
     return this;
   }
 
-  get privateState(): PayrollPrivateState {
-    return this.context.currentPrivateState;
-  }
-
   get ledger(): Ledger {
     return ledger(this.context.currentQueryContext.state);
   }
 
-  /** Stores an opening in the current caller's private state. */
-  remember(employeePk: Uint8Array, period: bigint, opening: PayslipOpening): this {
-    return this.as(withOpening(this.privateState, pureCircuits.payslipId(employeePk, period), opening));
+  private exec(state: PayrollPrivateState, run: (ctx: CircuitContext<PayrollPrivateState>) => { context: CircuitContext<PayrollPrivateState> }) {
+    this.context = run({ ...this.context, currentPrivateState: state }).context;
   }
 
-  fundPeriod(period: bigint, budget: bigint) {
-    this.context = this.contract.impureCircuits.fundPeriod(this.context, period, budget).context;
+  setSalaryRules(sk = this.employerSk) {
+    this.exec(prepareSetRules(this.book, sk).privateState, c => this.contract.impureCircuits.setSalaryRules(c));
   }
 
-  issuePayslip(employeePk: Uint8Array, period: bigint) {
-    this.context = this.contract.impureCircuits.issuePayslip(this.context, employeePk, period).context;
+  fundPeriod(period: bigint, budget: bigint, sk = this.employerSk) {
+    this.exec(prepareSetRules(this.book, sk).privateState, c => this.contract.impureCircuits.fundPeriod(c, period, budget));
   }
 
-  claimPayslip(period: bigint) {
-    this.context = this.contract.impureCircuits.claimPayslip(this.context, period).context;
+  /** Issues as the employer, keeping the employer book in sync on success. */
+  issuePayslip(employeePk: Uint8Array, period: bigint, opening: PayslipOpening, sk = this.employerSk) {
+    const { privateState, next } = prepareIssue(this.book, sk, employeePk, period, opening);
+    this.exec(privateState, c => this.contract.impureCircuits.issuePayslip(c, employeePk, period));
+    this.book = next;
   }
 
-  attestPeriod(period: bigint) {
-    this.context = this.contract.impureCircuits.attestPeriod(this.context, period).context;
+  claimPayslip(employeeSk: Uint8Array, period: bigint, opening: PayslipOpening) {
+    const id = pureCircuits.payslipId(pureCircuits.publicKey(employeeSk), period);
+    const state = withOpening(createPayrollPrivateState(employeeSk), id, opening);
+    this.exec(state, c => this.contract.impureCircuits.claimPayslip(c, period));
+  }
+
+  closePeriod(period: bigint, sk = this.employerSk) {
+    this.exec(prepareClose(this.book, sk).privateState, c => this.contract.impureCircuits.closePeriod(c, period));
+  }
+
+  attestPeriod(auditorSk: Uint8Array, period: bigint) {
+    this.exec(createPayrollPrivateState(auditorSk), c => this.contract.impureCircuits.attestPeriod(c, period));
   }
 }
