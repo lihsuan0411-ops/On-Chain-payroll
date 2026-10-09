@@ -4,17 +4,23 @@
 import {
   pureCircuits,
   calculatePayslip,
+  createEmployerBook,
+  createSalaryRules,
+  bandViolation,
   periodToUint,
   toHex,
   PayslipStatus,
+  LEVEL_NAMES,
+  type EmployerBook,
   type Ledger,
   type PayslipOpening,
   type PayslipDetails,
+  type SalaryRules,
 } from '@payroll/midnight-contract';
 import { seal, open, type Keystore, type SealedBox } from '../privacy';
 
-export { calculatePayslip, periodToUint, toHex, pureCircuits, PayslipStatus };
-export type { Ledger, PayslipOpening, PayslipDetails };
+export { calculatePayslip, bandViolation, periodToUint, toHex, pureCircuits, PayslipStatus, LEVEL_NAMES };
+export type { EmployerBook, Ledger, PayslipOpening, PayslipDetails, SalaryRules };
 
 export type ChainMode = 'local' | 'preprod';
 
@@ -29,9 +35,12 @@ export interface PayrollBackend {
   readonly mode: ChainMode;
   readonly contractAddress: string;
   readLedger(): Promise<Ledger>;
+  /** Publishes the commitment to the employer book's salary rules. */
+  setSalaryRules(): Promise<TxInfo>;
   fundPeriod(period: bigint, budget: bigint): Promise<TxInfo>;
   issuePayslip(employeePk: Uint8Array, period: bigint, opening: PayslipOpening): Promise<TxInfo>;
   claimPayslip(employeeId: string, period: bigint, opening: PayslipOpening): Promise<TxInfo>;
+  closePeriod(period: bigint): Promise<TxInfo>;
   attestPeriod(period: bigint): Promise<TxInfo>;
   /** Sends `amount` shielded pay tokens from the employer's wallet. */
   payEmployee(shieldedAddress: string, amount: bigint): Promise<TxInfo | null>;
@@ -40,10 +49,13 @@ export interface PayrollBackend {
 // ---------------------------------------------------------------------------
 // JSON with Uint8Array / bigint support, for localStorage.
 
+// Reads the raw value from the holder: some libraries define BigInt.prototype.toJSON,
+// which would otherwise turn bigints into plain strings before the replacer sees them.
 export const stringify = (value: unknown) =>
-  JSON.stringify(value, (_k, v) => {
-    if (v instanceof Uint8Array) return { $u8: toHex(v) };
-    if (typeof v === 'bigint') return { $bi: v.toString() };
+  JSON.stringify(value, function (this: Record<string, unknown>, key, v) {
+    const raw = key === '' ? value : this[key];
+    if (raw instanceof Uint8Array) return { $u8: toHex(raw) };
+    if (typeof raw === 'bigint') return { $bi: raw.toString() };
     return v;
   });
 
@@ -75,7 +87,15 @@ export function save(key: string, value: unknown) {
 
 const VAULT_KEY = 'payrollMidnightKeys.v1';
 
+// Keys derived from a wallet signature for this session (see lib/chain/wallet-keys.ts).
+// They take precedence over the demo vault and are never written to storage.
+const derivedKeys = new Map<RoleId, Uint8Array>();
+export const setDerivedSecretKey = (role: RoleId, sk: Uint8Array) => void derivedKeys.set(role, sk);
+export const hasDerivedSecretKey = (role: RoleId) => derivedKeys.has(role);
+
 export function secretKeyFor(role: RoleId): Uint8Array {
+  const derived = derivedKeys.get(role);
+  if (derived) return derived;
   const vault = load<Record<string, Uint8Array>>(VAULT_KEY, {});
   if (!vault[role]) {
     vault[role] = crypto.getRandomValues(new Uint8Array(32));
@@ -87,12 +107,55 @@ export function secretKeyFor(role: RoleId): Uint8Array {
 export const publicKeyFor = (role: RoleId) => pureCircuits.publicKey(secretKeyFor(role));
 
 // ---------------------------------------------------------------------------
-// Shielded addresses employees register when they connect Lace (Preprod).
+// Employer book (salary rules, issued openings, running totals) per contract.
 
-const ADDRESS_KEY = 'payrollShieldedAddresses.v1';
-export const shieldedAddressOf = (employeeId: string) => load<Record<string, string>>(ADDRESS_KEY, {})[employeeId];
-export function registerShieldedAddress(employeeId: string, address: string) {
-  save(ADDRESS_KEY, { ...load<Record<string, string>>(ADDRESS_KEY, {}), [employeeId]: address });
+const BOOK_KEY = 'payrollEmployerBooks.v1';
+
+export function employerBook(contract: string): EmployerBook {
+  const books = load<Record<string, EmployerBook>>(BOOK_KEY, {});
+  if (!books[contract]) {
+    books[contract] = createEmployerBook(createSalaryRules());
+    save(BOOK_KEY, books);
+  }
+  return books[contract];
+}
+
+export function saveEmployerBook(contract: string, book: EmployerBook) {
+  save(BOOK_KEY, { ...load<Record<string, EmployerBook>>(BOOK_KEY, {}), [contract]: book });
+}
+
+// ---------------------------------------------------------------------------
+// Employee directory: what employees publish during onboarding (their Midnight
+// public key and shielded payout address). Stands in for the HR system.
+
+const DIRECTORY_KEY = 'payrollEmployeeDirectory.v1';
+type DirectoryEntry = { midnightPk?: string; shieldedAddress?: string };
+
+const directory = () => load<Record<string, DirectoryEntry>>(DIRECTORY_KEY, {});
+
+export function registerEmployee(employeeId: string, entry: DirectoryEntry) {
+  const all = directory();
+  save(DIRECTORY_KEY, { ...all, [employeeId]: { ...all[employeeId], ...entry } });
+}
+
+export const registerShieldedAddress = (employeeId: string, address: string) =>
+  registerEmployee(employeeId, { shieldedAddress: address });
+export const shieldedAddressOf = (employeeId: string) => directory()[employeeId]?.shieldedAddress;
+
+/** The employee's Midnight public key: as registered, else from this browser's keys. */
+export function employeePublicKey(employeeId: string): Uint8Array {
+  const registered = directory()[employeeId]?.midnightPk;
+  return registered ? fromHex(registered) : publicKeyFor(employeeRole(employeeId));
+}
+
+export const isEmployeeRegistered = (employeeId: string) => !!directory()[employeeId]?.midnightPk;
+
+// The auditor publishes its key the same way; the employer deploys with it.
+const AUDITOR_ENTRY = '#auditor';
+export const registerAuditor = (midnightPk: string) => registerEmployee(AUDITOR_ENTRY, { midnightPk });
+export function auditorPublicKey(): Uint8Array {
+  const registered = directory()[AUDITOR_ENTRY]?.midnightPk;
+  return registered ? fromHex(registered) : publicKeyFor('auditor');
 }
 
 // ---------------------------------------------------------------------------
@@ -134,10 +197,36 @@ export async function readOpening(
   keystore: Keystore,
 ): Promise<{ opening: PayslipOpening; verified: boolean } | null> {
   const sealed = load<Mailbox>(MAILBOX_KEY, {})[`${contract}:${record.id}`];
-  if (!sealed?.[holder] || !keystore[holder]) return null;
+  const privateKey = keystore[holder]?.privateKey;
+  if (!sealed?.[holder] || !privateKey) return null;
   try {
-    const opening = openingFromJson(await open(keystore[holder].privateKey, sealed[holder]));
+    const opening = openingFromJson(await open(privateKey, sealed[holder]));
     return { opening, verified: toHex(pureCircuits.payslipCommitment(opening)) === record.commitment };
+  } catch {
+    return null;
+  }
+}
+
+/** Shares the salary rules with the auditor, so payslips can be checked against their bands. */
+export async function postRules(contract: string, rules: SalaryRules, holder: string, keystore: Keystore) {
+  const box = await seal(keystore[holder].publicKey, {
+    bands: rules.bands.map(b => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, Number(v)]))),
+    salt: toHex(rules.salt),
+  });
+  save(MAILBOX_KEY, { ...load<Mailbox>(MAILBOX_KEY, {}), [`${contract}:rules`]: { [holder]: box } });
+}
+
+export async function readRules(contract: string, ledger: Ledger, holder: string, keystore: Keystore) {
+  const box = load<Mailbox>(MAILBOX_KEY, {})[`${contract}:rules`]?.[holder];
+  const privateKey = keystore[holder]?.privateKey;
+  if (!box || !privateKey) return null;
+  try {
+    const j = await open<{ bands: Record<string, number>[]; salt: string }>(privateKey, box);
+    const rules: SalaryRules = {
+      bands: j.bands.map(b => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, BigInt(v)]))) as SalaryRules['bands'],
+      salt: fromHex(j.salt),
+    };
+    return { rules, verified: toHex(pureCircuits.salaryRulesCommitment(rules)) === toHex(ledger.rulesCommitment) };
   } catch {
     return null;
   }
@@ -158,7 +247,7 @@ export type PayslipView = {
 export const periodLabel = (p: bigint) => `${p / 100n}-${String(p % 100n).padStart(2, '0')}`;
 
 export function payslipViews(ledger: Ledger, employeeIds: string[]): PayslipView[] {
-  const byPk = new Map(employeeIds.map(id => [toHex(publicKeyFor(employeeRole(id))), id]));
+  const byPk = new Map(employeeIds.map(id => [toHex(employeePublicKey(id)), id]));
   return Array.from(ledger.payslips, ([id, rec]) => ({
     id: toHex(id),
     employeePk: toHex(rec.employee),
@@ -173,11 +262,15 @@ export type PeriodSummary = {
   root: string | null;
   issued: number;
   budget: bigint | null;
+  closedTotal: bigint | null;
   audited: boolean;
+  rulesPublished: boolean;
 };
 
 export function periodSummary(ledger: Ledger, period: bigint): PeriodSummary {
   return {
+    closedTotal: ledger.periodClosed.member(period) ? ledger.periodClosed.lookup(period) : null,
+    rulesPublished: ledger.rulesVersion > 0n,
     root: ledger.periodRoots.member(period) ? toHex(ledger.periodRoots.lookup(period)) : null,
     issued: ledger.periodIssued.member(period) ? Number(ledger.periodIssued.lookup(period)) : 0,
     budget: ledger.periodBudgets.member(period) ? ledger.periodBudgets.lookup(period) : null,
@@ -186,7 +279,7 @@ export function periodSummary(ledger: Ledger, period: bigint): PeriodSummary {
 }
 
 /** A fresh opening with a random 32-byte salt. */
-export const newOpening = (base: number, allowance: number, bonus: number): PayslipOpening => ({
-  details: calculatePayslip(BigInt(base), BigInt(allowance), BigInt(bonus)),
+export const newOpening = (level: number, base: number, allowance: number, bonus: number): PayslipOpening => ({
+  details: calculatePayslip(BigInt(level), BigInt(base), BigInt(allowance), BigInt(bonus)),
   salt: crypto.getRandomValues(new Uint8Array(32)),
 });

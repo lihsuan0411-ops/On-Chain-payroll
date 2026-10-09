@@ -2,6 +2,7 @@
   "name": "midnight-demo",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -15,7 +16,8 @@
     "cardano:test:offchain": "tsx scripts/test-cardano-reserve.ts",
     "chain:test:local": "tsx scripts/test-local-backend.mts",
     "prebuild": "node scripts/sync-zk-assets.mjs",
-    "predev": "node scripts/sync-zk-assets.mjs"
+    "predev": "node scripts/sync-zk-assets.mjs",
+    "devnet:e2e": "tsx scripts/devnet/e2e.mts"
   },
   "dependencies": {
     "@meshsdk/core": "1.9.1",
@@ -29,6 +31,8 @@
     "@midnight-ntwrk/midnight-js-protocol": "4.1.1",
     "@midnight-ntwrk/midnight-js-types": "4.1.1",
     "@midnight-ntwrk/midnight-js-utils": "4.1.1",
+    "@midnight-ntwrk/onchain-runtime-v3": "3.0.0",
+    "@noble/curves": "2.4.0",
     "buffer": "6.0.3",
     "jspdf": "^3.0.4",
     "jspdf-autotable": "^5.0.2",
@@ -41,6 +45,9 @@
   },
   "devDependencies": {
     "@meshsdk/core-csl": "1.9.1",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.1.1",
+    "@midnight-ntwrk/testkit-js": "4.1.1",
+    "@midnight-ntwrk/wallet-sdk": "1.2.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -48,6 +55,7 @@
     "@types/semver": "7.7.0",
     "eslint": "^9",
     "eslint-config-next": "16.0.4",
+    "pino": "10.3.1",
     "tailwindcss": "^4",
     "tsx": "4.20.3",
     "typescript": "^5"
@@ -55,5 +63,8 @@
   "workspaces": [
     "contracts/midnight",
     "contracts/cardano"
-  ]
+  ],
+  "overrides": {
+    "@midnight-ntwrk/onchain-runtime-v3": "3.0.0"
+  }
 }

@@ -46,3 +46,6 @@ next-env.d.ts
 
 # aiken build cache
 /contracts/cardano/build/
+
+# devnet / testkit logs
+/logs/

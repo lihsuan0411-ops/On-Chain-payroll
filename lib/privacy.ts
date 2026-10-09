@@ -7,13 +7,18 @@
 // check it against that commitment with the contract's payslipCommitment
 // circuit (lib/chain/core.ts).
 //
-// In this MVP the keystore lives in localStorage to stand in for each party's
-// wallet. In production every private key stays in its owner's wallet and only
-// the public keys are published.
+// Identities come from one of two places:
+//   - derived from a wallet signature (identityFromSeed, lib/chain/wallet-keys.ts):
+//     the private key lives only in memory and only the public key is stored,
+//     so the holder can recover it on any device by signing again;
+//   - otherwise a random demo identity kept in localStorage (Local mode).
+
+import { p256 } from '@noble/curves/nist.js';
 
 export type SealedBox = { epk: JsonWebKey; iv: string; ct: string };
 
-export type Identity = { publicKey: JsonWebKey; privateKey: JsonWebKey };
+/** privateKey is absent for holders whose key is derived from someone else's wallet. */
+export type Identity = { publicKey: JsonWebKey; privateKey?: JsonWebKey };
 export type Keystore = Record<string, Identity>;
 
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' } as const;
@@ -27,6 +32,35 @@ const toB64 = (buf: ArrayBuffer | Uint8Array) => {
 };
 
 const fromB64 = (b64: string) => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+const toB64Url = (bytes: Uint8Array) => toB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/** Deterministic P-256 identity from a 32-byte seed (e.g. a hashed wallet signature). */
+export async function identityFromSeed(seed: Uint8Array): Promise<Identity> {
+  let sk = new Uint8Array(await crypto.subtle.digest('SHA-256', seed as BufferSource));
+  while (!p256.utils.isValidSecretKey(sk)) sk = new Uint8Array(await crypto.subtle.digest('SHA-256', sk as BufferSource));
+  const point = p256.getPublicKey(sk, false); // 0x04 || X || Y
+  const publicKey: JsonWebKey = { kty: 'EC', crv: 'P-256', x: toB64Url(point.slice(1, 33)), y: toB64Url(point.slice(33)), ext: true };
+  return { publicKey, privateKey: { ...publicKey, d: toB64Url(sk) } };
+}
+
+// Wallet-derived identities for this session; never persisted.
+const derived = new Map<string, Identity>();
+
+/** Uses a wallet-derived identity for `holder` and publishes only its public key. */
+export function setDerivedIdentity(holder: string, identity: Identity) {
+  derived.set(holder, identity);
+  const store = readStore();
+  store[holder] = { publicKey: identity.publicKey };
+  localStorage.setItem(KEYSTORE_KEY, JSON.stringify(store));
+}
+
+function readStore(): Keystore {
+  try {
+    return JSON.parse(localStorage.getItem(KEYSTORE_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
 
 export async function generateIdentity(): Promise<Identity> {
   const pair = await crypto.subtle.generateKey(ECDH, true, ['deriveKey']);
@@ -36,14 +70,12 @@ export async function generateIdentity(): Promise<Identity> {
   };
 }
 
-/** Loads the demo keystore, creating identities for any holder that has none yet. */
+/**
+ * Loads the keystore, creating demo identities for holders that have none yet.
+ * Wallet-derived identities from this session take precedence.
+ */
 export async function loadKeystore(holderIds: string[]): Promise<Keystore> {
-  let store: Keystore = {};
-  try {
-    store = JSON.parse(localStorage.getItem(KEYSTORE_KEY) || '{}');
-  } catch {
-    store = {};
-  }
+  const store = readStore();
   let changed = false;
   for (const id of holderIds) {
     if (!store[id]) {
@@ -52,6 +84,7 @@ export async function loadKeystore(holderIds: string[]): Promise<Keystore> {
     }
   }
   if (changed) localStorage.setItem(KEYSTORE_KEY, JSON.stringify(store));
+  for (const [holder, identity] of derived) store[holder] = identity;
   return store;
 }
 
@@ -64,7 +97,7 @@ async function deriveAesKey(privateJwk: JsonWebKey, publicJwk: JsonWebKey, usage
 /** Encrypts `payload` so that only the holder of `recipientPublicKey` can read it. */
 export async function seal(recipientPublicKey: JsonWebKey, payload: unknown): Promise<SealedBox> {
   const ephemeral = await generateIdentity();
-  const key = await deriveAesKey(ephemeral.privateKey, recipientPublicKey, 'encrypt');
+  const key = await deriveAesKey(ephemeral.privateKey!, recipientPublicKey, 'encrypt');
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(payload)));
   return { epk: ephemeral.publicKey, iv: toB64(iv), ct: toB64(ct) };

@@ -13,6 +13,11 @@ const MODE_KEY = 'payrollChainMode';
 const PREPROD_CONTRACT_KEY = 'payrollPreprodContract.v1';
 export const AUDITOR_HOLDER = 'AUDITOR';
 
+async function joinNetwork(api: ConnectedAPI, address: string) {
+  const [{ NetworkPayrollBackend }, lace] = await Promise.all([import('./backend-network'), import('./lace')]);
+  return NetworkPayrollBackend.join(await lace.laceProviders(api), address, lace.lacePayout(api));
+}
+
 const readMode = (): ChainMode => {
   try {
     return localStorage.getItem(MODE_KEY) === 'preprod' ? 'preprod' : 'local';
@@ -87,14 +92,14 @@ export function usePayrollChain(employeeIds: string[]) {
 
   /** Connects Lace and joins the configured contract, if any. Returns the shielded address. */
   const connectMidnight = async () => {
-    const { connectMidnightWallet, PreprodPayrollBackend } = await import('./backend-preprod');
+    const { connectMidnightWallet } = await import('./lace');
     const api = await connectMidnightWallet();
     const { shieldedAddress: addr } = await api.getShieldedAddresses();
     setMidnightApi(api);
     setShieldedAddress(addr);
     const address = process.env.NEXT_PUBLIC_PAYROLL_CONTRACT || localStorage.getItem(PREPROD_CONTRACT_KEY);
     if (address) {
-      const b = await PreprodPayrollBackend.join(api, address);
+      const b = await joinNetwork(api, address);
       setBackend(b);
       await refresh(b);
     }
@@ -113,8 +118,8 @@ export function usePayrollChain(employeeIds: string[]) {
   const deployPreprod = () =>
     run(async () => {
       if (!midnightApi) throw new Error('Connect Lace first');
-      const { PreprodPayrollBackend } = await import('./backend-preprod');
-      const b = await PreprodPayrollBackend.deploy(midnightApi);
+      const [{ NetworkPayrollBackend }, lace] = await Promise.all([import('./backend-network'), import('./lace')]);
+      const b = await NetworkPayrollBackend.deploy(await lace.laceProviders(midnightApi), lace.lacePayout(midnightApi));
       localStorage.setItem(PREPROD_CONTRACT_KEY, b.contractAddress);
       setBackend(b);
       await refresh(b);
@@ -124,8 +129,7 @@ export function usePayrollChain(employeeIds: string[]) {
   const joinPreprod = (address: string) =>
     run(async () => {
       if (!midnightApi) throw new Error('Connect Lace first');
-      const { PreprodPayrollBackend } = await import('./backend-preprod');
-      const b = await PreprodPayrollBackend.join(midnightApi, address.trim());
+      const b = await joinNetwork(midnightApi, address.trim());
       localStorage.setItem(PREPROD_CONTRACT_KEY, b.contractAddress);
       setBackend(b);
       await refresh(b);
@@ -162,6 +166,8 @@ export function usePayrollChain(employeeIds: string[]) {
       shieldedAddress,
       contractAddress: backend?.contractAddress ?? '',
       refresh: () => refresh(),
+      // Picks up wallet-derived identities after a role unlocks its keys.
+      reloadKeys: () => loadKeystore([...ids.split(','), AUDITOR_HOLDER]).then(setKeystore),
       run,
       connectMidnight,
       deployPreprod,

@@ -40,6 +40,12 @@ const provider = () =>
 
 export const cardanoWallets = () => BrowserWallet.getInstalledWallets();
 
+/** A CIP-30 wallet used only to sign the key-derivation message (lib/chain/wallet-keys.ts). */
+export async function connectSigner(walletName: string) {
+  const wallet = await BrowserWallet.enable(walletName);
+  return { signData: (message: string) => wallet.signData(message) };
+}
+
 export class CardanoReserveClient {
   private constructor(
     private readonly wallet: BrowserWallet,

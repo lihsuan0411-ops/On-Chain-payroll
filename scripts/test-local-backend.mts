@@ -22,10 +22,11 @@ const EMPLOYEES = ['Aden', 'Alice', 'Bob'];
 let backend = LocalPayrollBackend.open();
 const keystore = await loadKeystore([...EMPLOYEES, 'AUDITOR']);
 
+await backend.setSalaryRules();
 await backend.fundPeriod(PERIOD, 250_000n);
 
 const alicePk = core.publicKeyFor(core.employeeRole('Alice'));
-const opening = core.newOpening(75000, 5000, 6000);
+const opening = core.newOpening(3, 75000, 5000, 6000);
 assert.equal(opening.details.net, 78700n);
 await backend.issuePayslip(alicePk, PERIOD, opening);
 
@@ -52,19 +53,64 @@ await assert.rejects(() => backend.claimPayslip('Bob', PERIOD, forAlice!.opening
 await backend.claimPayslip('Alice', PERIOD, forAlice!.opening);
 await assert.rejects(() => backend.claimPayslip('Alice', PERIOD, forAlice!.opening), /already claimed/);
 
+await assert.rejects(() => backend.attestPeriod(PERIOD), /not closed/);
+await backend.closePeriod(PERIOD);
 await backend.attestPeriod(PERIOD);
 ledger = await LocalPayrollBackend.open().readLedger();
 [view] = core.payslipViews(ledger, EMPLOYEES);
 assert.equal(view.status, 'Claimed');
 const summary = core.periodSummary(ledger, PERIOD);
-assert.deepEqual({ ...summary, root: !!summary.root }, { root: true, issued: 1, budget: 250_000n, audited: true });
-
-// Bad figures are rejected by the circuit itself.
-const bobPk = core.publicKeyFor(core.employeeRole('Bob'));
-const bad = core.newOpening(90000, 8000, 0);
-await assert.rejects(
-  () => backend.issuePayslip(bobPk, PERIOD, { ...bad, details: { ...bad.details, tax: 0n } }),
-  /Income tax/,
+assert.deepEqual(
+  { ...summary, root: !!summary.root },
+  { root: true, issued: 1, budget: 250_000n, closedTotal: 78_700n, audited: true, rulesPublished: true },
 );
 
+// After closing, nothing more can be issued; and wrong levels are rejected by the circuit itself.
+const bobPk = core.publicKeyFor(core.employeeRole('Bob'));
+await assert.rejects(() => backend.issuePayslip(bobPk, PERIOD, core.newOpening(4, 90000, 8000, 0)), /already closed/);
+await assert.rejects(() => backend.issuePayslip(bobPk, 202606n, core.newOpening(1, 90000, 8000, 0)), /outside the band/);
+
 console.log('local backend: all checks passed');
+
+// ---------------------------------------------------------------------------
+// Wallet-derived keys (lib/chain/wallet-keys.ts).
+{
+  const walletKeys = await import('../lib/chain/wallet-keys');
+  const privacy = await import('../lib/privacy');
+  const hmacKey = await crypto.subtle.importKey('raw', new Uint8Array(32).fill(9), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  // Stand-in for a CIP-30 wallet: deterministic like Ed25519 (CIP-8).
+  const signer = {
+    signData: async (m: string) => ({
+      signature: core.toHex(new Uint8Array(await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(m)))),
+    }),
+  };
+  const a = await walletKeys.deriveRoleKeys(signer, core.employeeRole('Carol'));
+  const b = await walletKeys.deriveRoleKeys(signer, core.employeeRole('Carol'));
+  assert.deepEqual(a.secretKey, b.secretKey, 'same signature -> same Midnight key');
+  assert.deepEqual(a.identity, b.identity, 'same signature -> same view key');
+  const other = await walletKeys.deriveRoleKeys(signer, core.employeeRole('Dave'));
+  assert.notDeepEqual(a.secretKey, other.secretKey, 'roles get different keys');
+
+  const randomSigner = { signData: async () => ({ signature: core.toHex(crypto.getRandomValues(new Uint8Array(64))) }) };
+  await assert.rejects(() => walletKeys.deriveRoleKeys(randomSigner, 'auditor'), /randomised signatures/);
+
+  // Unlocking registers the employee; the employer pays the registered key and
+  // only the wallet-derived view key can open the payslip.
+  const pk = await walletKeys.unlockRole(signer, core.employeeRole('Carol'), 'Carol');
+  assert.equal(core.toHex(core.employeePublicKey('Carol')), pk);
+  const ks = await privacy.loadKeystore(['Carol', 'AUDITOR']);
+  const fresh = (await import('../lib/chain/backend-local')).LocalPayrollBackend.deploy();
+  await fresh.setSalaryRules();
+  const carolOpening = core.newOpening(2, 52000, 3000, 0);
+  await fresh.issuePayslip(core.employeePublicKey('Carol'), PERIOD, carolOpening);
+  const carolId = core.toHex(core.pureCircuits.payslipId(core.employeePublicKey('Carol'), PERIOD));
+  await core.postOpening(fresh.contractAddress, carolId, carolOpening, ['Carol', 'AUDITOR'], ks);
+  const [carolView] = core.payslipViews(await fresh.readLedger(), ['Carol']);
+  assert.equal(carolView.employeeId, 'Carol');
+  assert.ok((await core.readOpening(fresh.contractAddress, carolView, 'Carol', ks))?.verified);
+  await fresh.claimPayslip('Carol', PERIOD, carolOpening);
+  // Without the in-memory identity (new session, no signature yet) the payslip stays sealed.
+  const stored = JSON.parse(localStorage.getItem('payrollKeystore.v1')!);
+  assert.equal(stored.Carol.privateKey, undefined, 'derived private keys are never stored');
+  console.log('wallet-derived keys: all checks passed');
+}
