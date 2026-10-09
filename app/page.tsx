@@ -203,7 +203,12 @@ const T = {
     unlocked: "Keys derived from your wallet signature",
     rulesVerified: "Salary rules match the on-chain commitment",
     withinBand: "Within the band for level",
-    outOfBand: "Outside the band for level"
+    outOfBand: "Outside the band for level",
+    noDust: "No DUST yet. Midnight fees are paid in DUST, not tNIGHT. In Lace, open Midnight and designate your tNIGHT for DUST generation, then wait a few minutes for DUST to accrue before deploying or sending transactions.",
+    dustOk: "DUST available for transaction fees.",
+    proverLabel: "Proof server",
+    localProverHint: "Lace generates proofs with a proof server on this computer. Keep it running and on version 8.1.0 (the current networks reject proofs from older versions):",
+    noContractEmployee: "No payroll contract on Preprod yet. The employer deploys it and issues payslips first; they will appear here."
   },
   zh: {
     navTitle: "鏈上薪資系統",
@@ -369,7 +374,12 @@ const T = {
     unlocked: "已由錢包簽章推導金鑰",
     rulesVerified: "薪資規則與鏈上承諾一致",
     withinBand: "符合職級區間",
-    outOfBand: "超出職級區間"
+    outOfBand: "超出職級區間",
+    noDust: "還沒有 DUST。Midnight 的手續費用 DUST 支付，不是 tNIGHT。請在 Lace 的 Midnight 頁面把 tNIGHT 指定為產生 DUST，等幾分鐘 DUST 累積後，再部署或送出交易。",
+    dustOk: "DUST 充足，可支付交易手續費。",
+    proverLabel: "證明伺服器",
+    localProverHint: "Lace 會用你電腦上的 proof server 產生證明，請保持執行並使用 8.1.0 版（目前的網路不接受舊版產生的證明）：",
+    noContractEmployee: "Preprod 上還沒有薪資合約。需要先由雇主部署合約並發出薪資單，之後會顯示在這裡。"
   }
 };
 
@@ -973,6 +983,9 @@ function EmployeeView({ chain, walletConnected, onConnect, onLogin, onSetAlert, 
         <button onClick={onLogout} className="text-xs font-black text-slate-500 hover:text-white border-b-2 border-slate-800 pb-1 uppercase">{t.logout}</button>
       </div>
 
+      {chain.mode === 'preprod' && !chain.backend && (
+        <div className="mb-6 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-5 text-sm text-amber-200">{t.noContractEmployee}</div>
+      )}
       {chain.mode === 'preprod' && <UnlockKeys chain={chain} role={`employee:${loginId}`} holder={loginId} onError={onSetAlert} t={t} />}
 
       {chain.mode === 'preprod' && chain.shieldedAddress && (

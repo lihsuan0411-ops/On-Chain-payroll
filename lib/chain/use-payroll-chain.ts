@@ -33,6 +33,7 @@ export function usePayrollChain(employeeIds: string[]) {
   const [keystore, setKeystore] = useState<Keystore | null>(null);
   const [midnightApi, setMidnightApi] = useState<ConnectedAPI | null>(null);
   const [shieldedAddress, setShieldedAddress] = useState('');
+  const [walletInfo, setWalletInfo] = useState<{ dust: bigint; dustCap: bigint; networkId: string; proverServerUri?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -87,16 +88,18 @@ export function usePayrollChain(employeeIds: string[]) {
     } catch {}
     setMidnightApi(null);
     setShieldedAddress('');
+    setWalletInfo(null);
     setModeState(m);
   };
 
   /** Connects Lace and joins the configured contract, if any. Returns the shielded address. */
   const connectMidnight = async () => {
-    const { connectMidnightWallet } = await import('./lace');
+    const { connectMidnightWallet, walletStatus } = await import('./lace');
     const api = await connectMidnightWallet();
     const { shieldedAddress: addr } = await api.getShieldedAddresses();
     setMidnightApi(api);
     setShieldedAddress(addr);
+    setWalletInfo(await walletStatus(api).catch(() => null));
     const address = process.env.NEXT_PUBLIC_PAYROLL_CONTRACT || localStorage.getItem(PREPROD_CONTRACT_KEY);
     if (address) {
       const b = await joinNetwork(api, address);
@@ -119,6 +122,7 @@ export function usePayrollChain(employeeIds: string[]) {
     run(async () => {
       if (!midnightApi) throw new Error('Connect Lace first');
       const [{ NetworkPayrollBackend }, lace] = await Promise.all([import('./backend-network'), import('./lace')]);
+      await lace.assertCanPayFees(midnightApi);
       const b = await NetworkPayrollBackend.deploy(await lace.laceProviders(midnightApi), lace.lacePayout(midnightApi));
       localStorage.setItem(PREPROD_CONTRACT_KEY, b.contractAddress);
       setBackend(b);
@@ -164,6 +168,7 @@ export function usePayrollChain(employeeIds: string[]) {
       error,
       midnightApi,
       shieldedAddress,
+      walletInfo,
       contractAddress: backend?.contractAddress ?? '',
       refresh: () => refresh(),
       // Picks up wallet-derived identities after a role unlocks its keys.
@@ -175,6 +180,6 @@ export function usePayrollChain(employeeIds: string[]) {
       resetLocal,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mode, backend, ledger, views, keystore, busy, error, midnightApi, shieldedAddress],
+    [mode, backend, ledger, views, keystore, busy, error, midnightApi, shieldedAddress, walletInfo],
   );
 }

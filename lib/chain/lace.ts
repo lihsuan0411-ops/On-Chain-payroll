@@ -47,6 +47,20 @@ export async function connectMidnightWallet(): Promise<ConnectedAPI> {
   return wallet.connect(MIDNIGHT_NETWORK_ID);
 }
 
+export const NO_DUST_MESSAGE =
+  'Your Lace wallet has no DUST, which pays Midnight transaction fees. In Lace, open Midnight and designate your tNIGHT for DUST generation, then wait until DUST appears.';
+
+/** Fails fast, before any proving, when the wallet cannot pay fees. */
+export async function assertCanPayFees(api: ConnectedAPI) {
+  const { balance } = await api.getDustBalance();
+  if (balance <= 0n) throw new Error(NO_DUST_MESSAGE);
+}
+
+export async function walletStatus(api: ConnectedAPI) {
+  const [dust, config] = await Promise.all([api.getDustBalance(), api.getConfiguration()]);
+  return { dust: dust.balance, dustCap: dust.cap, networkId: config.networkId, proverServerUri: config.proverServerUri };
+}
+
 export async function laceProviders(api: ConnectedAPI): Promise<PayrollProviders> {
   const config = await api.getConfiguration();
   const zkConfigProvider = new FetchZkConfigProvider<CircuitId>(`${window.location.origin}/midnight/payroll`, fetch.bind(window));
@@ -68,6 +82,7 @@ export async function laceProviders(api: ConnectedAPI): Promise<PayrollProviders
       getCoinPublicKey: () => shielded.shieldedCoinPublicKey,
       getEncryptionPublicKey: () => shielded.shieldedEncryptionPublicKey,
       balanceTx: async (tx: UnboundTransaction): Promise<FinalizedTransaction> => {
+        await assertCanPayFees(api);
         const { tx: balanced } = await api.balanceUnsealedTransaction(toHex(tx.serialize()));
         return Transaction.deserialize<SignatureEnabled, Proof, Binding>('signature', 'proof', 'binding', fromHex(balanced));
       },

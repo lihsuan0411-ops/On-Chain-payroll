@@ -79,6 +79,8 @@ export function ContractPanel({ chain, summary, period, periodU, walletConnected
       </div>
       <p className="text-slate-500 text-xs mb-5 font-medium">{chain.mode === 'preprod' ? t.modePreprodHint : t.modeLocalHint}</p>
 
+      {chain.mode === 'preprod' && <WalletStatus info={chain.walletInfo} t={t} />}
+
       {needsContract ? (
         !walletConnected ? (
           <button onClick={onConnect} className="w-full bg-emerald-600/10 border border-emerald-500/30 text-emerald-400 py-3 rounded-xl text-xs font-black uppercase tracking-widest">{t.connectLace}</button>
@@ -330,6 +332,28 @@ export function UnlockKeys({ chain, role, holder, onError, onUnlocked, t }: any)
             </div>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+/** Preprod: DUST (fee) balance and where proofs are generated, with fixes for common blockers. */
+export function WalletStatus({ info, t }: any) {
+  if (!info) return null;
+  const noDust = info.dust <= 0n;
+  const localProver = info.proverServerUri && /localhost|127\.0\.0\.1/.test(info.proverServerUri);
+  return (
+    <div className="mb-5 space-y-2">
+      <div className={`rounded-xl border px-4 py-3 text-xs ${noDust ? 'border-amber-500/40 bg-amber-500/10 text-amber-200' : 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300'}`}>
+        <div className="font-black uppercase tracking-widest text-[10px] mb-1">DUST · {info.networkId}</div>
+        {noDust ? t.noDust : t.dustOk}
+      </div>
+      {localProver && (
+        <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 px-4 py-3 text-xs text-sky-200">
+          <div className="font-black uppercase tracking-widest text-[10px] mb-1">{t.proverLabel} · {info.proverServerUri}</div>
+          {t.localProverHint}
+          <pre className="mt-2 font-mono text-[10px] text-slate-300 bg-black/40 rounded-lg p-2 whitespace-pre-wrap">docker run -p 6300:6300 midnightntwrk/proof-server:8.1.0 midnight-proof-server -v</pre>
+        </div>
       )}
     </div>
   );
