@@ -207,7 +207,7 @@ const T = {
     noDust: "No DUST yet. Midnight fees are paid in DUST, not tNIGHT. In Lace, open Midnight and designate your tNIGHT for DUST generation, then wait a few minutes for DUST to accrue before deploying or sending transactions.",
     dustOk: "DUST available for transaction fees.",
     proverLabel: "Proof server",
-    localProverHint: "Lace generates proofs with a proof server on this computer. Keep it running and on version 8.1.0 (the current networks reject proofs from older versions):",
+    localProverHint: "Lace generates proofs with a proof server on this computer. Keep it running, on version 8.1.0 as listed in Midnight's compatibility matrix for the current networks:",
     noContractEmployee: "No payroll contract on Preprod yet. The employer deploys it and issues payslips first; they will appear here."
   },
   zh: {
@@ -378,7 +378,7 @@ const T = {
     noDust: "還沒有 DUST。Midnight 的手續費用 DUST 支付，不是 tNIGHT。請在 Lace 的 Midnight 頁面把 tNIGHT 指定為產生 DUST，等幾分鐘 DUST 累積後，再部署或送出交易。",
     dustOk: "DUST 充足，可支付交易手續費。",
     proverLabel: "證明伺服器",
-    localProverHint: "Lace 會用你電腦上的 proof server 產生證明，請保持執行並使用 8.1.0 版（目前的網路不接受舊版產生的證明）：",
+    localProverHint: "Lace 會用你電腦上的 proof server 產生證明，請保持執行，並使用 Midnight 相容表上目前網路對應的 8.1.0 版：",
     noContractEmployee: "Preprod 上還沒有薪資合約。需要先由雇主部署合約並發出薪資單，之後會顯示在這裡。"
   }
 };
