@@ -6,8 +6,10 @@ import React, { useState, useEffect } from 'react';
 import { 
   Shield, Wallet, Building2, User, ChevronRight, CheckCircle, 
   Activity, FileText, Server, Eye, Download, 
-  Loader2, X, ChevronLeft, LogOut, LogIn, Hexagon, BadgeCheck, FileSearch, Database, LockKeyhole, Landmark
+  Loader2, X, ChevronLeft, LogOut, LogIn, Hexagon, BadgeCheck, FileSearch, Database, LockKeyhole, Landmark,
+  Lock, ShieldAlert, ShieldCheck
 } from 'lucide-react';
+import { seal, commit, randomHex, loadKeystore, revealRecord } from '@/lib/privacy';
 
 type UserRole = 'landing' | 'employer' | 'employee' | 'auditor';
 type WalletType = 'metamask' | 'eternl' | 'safe' | '';
@@ -18,6 +20,15 @@ const EMPLOYEES = [
   { id: "Alice", name: "Alice", title: "Senior Dev", address: "0x71C...976F", base: 75000, allowance: 5000 },
   { id: "Bob", name: "Bob", title: "Product Lead", address: "0x3B2...1A9E", base: 90000, allowance: 8000 },
 ];
+
+// Holder id of the regulator view key; every disbursement is also sealed for it.
+const AUDITOR_ID = "AUDITOR";
+const AUDITOR_ADDRESS = "0xAUDIT...4242";
+// v2 ledger stores only commitments + sealed payloads; v1 (plaintext) records are ignored.
+const LEDGER_KEY = 'payrollLedger.v2';
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const shortHash = (h: string) => h ? `${h.slice(0, 10)}...${h.slice(-6)}` : '';
 
 const T = {
   en: {
@@ -107,7 +118,26 @@ const T = {
     verifiedZk: "Verified ZK-Rollup Transaction",
     empId: "Employee Identifier",
     disbPeriod: "Disbursement Period",
-    closeIns: "Close Inspector"
+    closeIns: "Close Inspector",
+    netSettled: "Net Settled",
+    selectAccount: "Select Account...",
+    periodLabel: "Period",
+    immutableNote: "Salary figures are encrypted. Only the commitment is published to the ledger.",
+    statusPending: "Pending",
+    statusClaimed: "Claimed",
+    accountNotFound: "Account not found. Try Aden, Alice or Bob.",
+    decrypting: "Decrypting...",
+    decryptFailed: "Unable to decrypt",
+    commitment: "On-Chain Commitment",
+    commitmentOk: "Commitment matches decrypted figures",
+    commitmentBad: "Commitment mismatch: figures may have been tampered with",
+    publicLedger: "Public Ledger View",
+    publicLedgerDesc: "What anyone on the network can see for this period.",
+    encrypted: "Encrypted",
+    noRecordsPeriod: "No disbursements for this period yet.",
+    bonusInvalid: "Bonus cannot be negative.",
+    sealedFor: "Sealed for",
+    keystoreLoading: "Loading key vault..."
   },
   zh: {
     navTitle: "鏈上薪資系統",
@@ -196,7 +226,26 @@ const T = {
     verifiedZk: "已驗證的 ZK-Rollup 交易",
     empId: "員工識別碼",
     disbPeriod: "撥款週期",
-    closeIns: "關閉視窗"
+    closeIns: "關閉視窗",
+    netSettled: "實際結算金額",
+    selectAccount: "選擇員工帳號...",
+    periodLabel: "週期",
+    immutableNote: "薪資數字已加密，分類帳上只公開承諾值 (Commitment)。",
+    statusPending: "待提領",
+    statusClaimed: "已提領",
+    accountNotFound: "查無此帳號，請輸入 Aden、Alice 或 Bob。",
+    decrypting: "解密中...",
+    decryptFailed: "無法解密",
+    commitment: "鏈上承諾值",
+    commitmentOk: "承諾值與解密後的數字相符",
+    commitmentBad: "承諾值不符：數字可能遭到竄改",
+    publicLedger: "公開分類帳視角",
+    publicLedgerDesc: "網路上任何人在此週期能看到的內容。",
+    encrypted: "已加密",
+    noRecordsPeriod: "此週期尚無發放紀錄。",
+    bonusInvalid: "獎金不可為負數。",
+    sealedFor: "加密授權對象",
+    keystoreLoading: "載入金鑰庫中..."
   }
 };
 
@@ -223,29 +272,39 @@ export default function OnChainPayrollApp() {
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [duplicateAlert, setDuplicateAlert] = useState<string | null>(null);
+  const [keystore, setKeystore] = useState<any>(null);
+  const [ledgerLoaded, setLedgerLoaded] = useState(false);
+  const [activeEmployeeId, setActiveEmployeeId] = useState('');
 
   const t = T[lang];
 
   useEffect(() => {
-    const savedDB = localStorage.getItem('payrollDB');
-    if (savedDB) setPayrollData(JSON.parse(savedDB));
+    try {
+      const savedDB = localStorage.getItem(LEDGER_KEY);
+      if (savedDB) setPayrollData(JSON.parse(savedDB));
+    } catch {}
+    localStorage.removeItem('payrollDB'); // drop the old plaintext ledger
+    setLedgerLoaded(true);
+    loadKeystore([...EMPLOYEES.map(e => e.id), AUDITOR_ID]).then(setKeystore);
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('payrollDB', JSON.stringify(payrollData));
-  }, [payrollData]);
+    if (ledgerLoaded) localStorage.setItem(LEDGER_KEY, JSON.stringify(payrollData));
+  }, [payrollData, ledgerLoaded]);
 
   const addPayrollRecord = (record: any) => setPayrollData(prev => [record, ...prev]);
   const updatePayrollRecord = (updatedRecord: any) => setPayrollData(prev => prev.map(record => record.id === updatedRecord.id ? updatedRecord : record));
-  const markAsWithdrawn = (id: number) => setPayrollData(prev => prev.map(record => record.id === id ? { ...record, status: 'Claimed' } : record));
+  const markAsWithdrawn = (id: number) => setPayrollData(prev => prev.map(record => record.id === id ? { ...record, status: 'Claimed', claimedAt: new Date().toISOString() } : record));
 
   const connectWallet = async (type: WalletType) => {
     setIsConnecting(true);
     setShowWalletModal(false);
     setTimeout(() => {
-      if (currentView === 'auditor') setWalletAddress("0xAUDIT...4242");
-      else if (type === 'metamask') setWalletAddress("0x71C...976F");
-      else setWalletAddress("addr_test1...User");
+      const employee = EMPLOYEES.find(e => e.id === activeEmployeeId);
+      if (currentView === 'auditor') setWalletAddress(AUDITOR_ADDRESS);
+      else if (currentView === 'employee' && employee) setWalletAddress(employee.address);
+      else if (type === 'metamask') setWalletAddress("0xEMPL...C0DE");
+      else setWalletAddress("addr_test1...Corp");
       setWalletType(type);
       setWalletConnected(true);
       setIsConnecting(false);
@@ -260,7 +319,14 @@ export default function OnChainPayrollApp() {
 
   const navigateToLanding = () => {
     setCurrentView('landing');
+    setActiveEmployeeId('');
     disconnectWallet();
+  };
+
+  const handleEmployeeLogin = (id: string) => {
+    setActiveEmployeeId(id);
+    const employee = EMPLOYEES.find(e => e.id === id);
+    if (walletConnected && employee) setWalletAddress(employee.address);
   };
 
   const toggleLang = () => setLang(prev => prev === 'en' ? 'zh' : 'en');
@@ -313,9 +379,9 @@ export default function OnChainPayrollApp() {
 
       <main className="relative z-10">
         {currentView === 'landing' && <LandingView onNavigate={setCurrentView} t={t} />}
-        {currentView === 'employer' && <EmployerView payrollData={payrollData} walletConnected={walletConnected} onConnect={() => setShowWalletModal(true)} onPaymentSuccess={addPayrollRecord} onPaymentUpdate={updatePayrollRecord} onSetAlert={setDuplicateAlert} onNavigateBack={navigateToLanding} t={t} />}
-        {currentView === 'employee' && <EmployeeView walletConnected={walletConnected} onConnect={() => setShowWalletModal(true)} payrollData={payrollData} onWithdraw={markAsWithdrawn} onLogout={navigateToLanding} t={t} />}
-        {currentView === 'auditor' && <AuditorView payrollData={payrollData} walletConnected={walletConnected} onConnect={() => setShowWalletModal(true)} onNavigateBack={navigateToLanding} t={t} />}
+        {currentView === 'employer' && <EmployerView payrollData={payrollData} keystore={keystore} walletConnected={walletConnected} onConnect={() => setShowWalletModal(true)} onPaymentSuccess={addPayrollRecord} onPaymentUpdate={updatePayrollRecord} onSetAlert={setDuplicateAlert} onNavigateBack={navigateToLanding} t={t} />}
+        {currentView === 'employee' && <EmployeeView walletConnected={walletConnected} keystore={keystore} onConnect={() => setShowWalletModal(true)} onLogin={handleEmployeeLogin} payrollData={payrollData} onWithdraw={markAsWithdrawn} onLogout={navigateToLanding} t={t} />}
+        {currentView === 'auditor' && <AuditorView payrollData={payrollData} keystore={keystore} walletConnected={walletConnected} onConnect={() => setShowWalletModal(true)} onNavigateBack={navigateToLanding} t={t} />}
       </main>
 
       {/* Wallet Selection Modal */}
@@ -385,6 +451,22 @@ export default function OnChainPayrollApp() {
   );
 }
 
+// Decrypts the records sealed for `holder`. Returns id -> { details, verified } or null if unreadable.
+function useRevealed(records: any[], holder: string, keystore: any, enabled: boolean) {
+  const [revealed, setRevealed] = useState<Record<string, any>>({});
+  useEffect(() => {
+    if (!enabled || !keystore || !holder) { setRevealed({}); return; }
+    let cancelled = false;
+    Promise.all(records.map(async r => [r.id, await revealRecord(r, holder, keystore)] as const)).then(entries => {
+      if (!cancelled) setRevealed(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+  }, [records, holder, keystore, enabled]);
+  return revealed;
+}
+
+const statusLabel = (status: string, t: any) => status === 'Claimed' ? t.statusClaimed : t.statusPending;
+
 function LandingView({ onNavigate, t }: any) {
   return (
     <div className="max-w-7xl mx-auto p-6 pt-24 flex flex-col items-center text-center animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -428,7 +510,7 @@ function LandingView({ onNavigate, t }: any) {
   );
 }
 
-function EmployerView({ payrollData, walletConnected, onConnect, onPaymentSuccess, onPaymentUpdate, onSetAlert, onNavigateBack, t }: any) {
+function EmployerView({ payrollData, keystore, walletConnected, onConnect, onPaymentSuccess, onPaymentUpdate, onSetAlert, onNavigateBack, t }: any) {
   const [selectedEmpId, setSelectedEmpId] = useState('');
   const period = "2026-05";
   const [bonus, setBonus] = useState(0);
@@ -440,27 +522,44 @@ function EmployerView({ payrollData, walletConnected, onConnect, onPaymentSucces
   const healthFee = emp ? Math.floor(emp.base * 0.015) : 0;
   const taxFee = emp ? Math.floor((emp.base + emp.allowance + bonus) * 0.05) : 0;
   const totalNet = emp ? (emp.base + emp.allowance + bonus - laborFee - healthFee - taxFee) : 0;
+  const bonusInvalid = bonus < 0 || !Number.isFinite(bonus);
+  const periodRecords = payrollData.filter(r => r.period === period);
 
-  const handleExecute = () => {
+  // Seals the figures for the employee and the auditor and returns the ledger fields.
+  const buildSealedEntry = async () => {
+    const details = { base: emp.base, allowance: emp.allowance, bonus, labor: laborFee, health: healthFee, tax: taxFee, net: totalNet };
+    const salt = randomHex(16);
+    const payload = { details, salt };
+    const commitment = await commit(details, salt);
+    const sealed = {
+      [emp.id]: await seal(keystore[emp.id].publicKey, payload),
+      [AUDITOR_ID]: await seal(keystore[AUDITOR_ID].publicKey, payload),
+    };
+    return { commitment, sealed, hash: '0x' + commitment };
+  };
+
+  const handleExecute = async () => {
     if (!walletConnected) { onConnect(); return; }
+    if (!keystore || bonusInvalid) return;
     const existing = payrollData.find(r => r.empId === selectedEmpId && r.period === period);
     if (existing && existing.status === 'Claimed') {
       onSetAlert(t.dupAlert);
       return;
     }
     setStep(1);
-    setTimeout(() => setStep(2), 1000);
-    setTimeout(() => setStep(3), 2500);
-    setTimeout(() => setStep(4), 4000);
-    setTimeout(() => { 
-        setStep(5); 
-        if (existing) {
-          onPaymentUpdate({...existing, details: { base: emp?.base, allowance: emp?.allowance, bonus, labor: laborFee, health: healthFee, tax: taxFee, net: totalNet }});
-        } else {
-          onPaymentSuccess({ id: Date.now(), empId: selectedEmpId, period, status: 'Pending', hash: '0x' + Math.random().toString(36).substring(2, 15), details: { base: emp?.base, allowance: emp?.allowance, bonus, labor: laborFee, health: healthFee, tax: taxFee, net: totalNet } });
-        }
-        setShowSuccess(true);
-    }, 5000);
+    const entryPromise = buildSealedEntry();
+    await sleep(1000); setStep(2);
+    await sleep(1500); setStep(3);
+    await sleep(1500); setStep(4);
+    const entry = await entryPromise;
+    await sleep(1000);
+    if (existing) {
+      onPaymentUpdate({ ...existing, ...entry, updatedAt: new Date().toISOString() });
+    } else {
+      onPaymentSuccess({ id: Date.now(), empId: selectedEmpId, period, status: 'Pending', createdAt: new Date().toISOString(), ...entry });
+    }
+    setStep(5);
+    setShowSuccess(true);
   };
 
   return (
@@ -470,7 +569,7 @@ function EmployerView({ payrollData, walletConnected, onConnect, onPaymentSucces
             <div className="bg-[#111623] border border-blue-500/50 p-10 rounded-[2.5rem] shadow-2xl text-center w-full max-w-sm">
                 <CheckCircle className="w-16 h-16 text-blue-400 mx-auto mb-6 animate-bounce" />
                 <h2 className="text-3xl font-black text-white mb-2">{t.added}</h2>
-                <p className="text-slate-400 mb-10 text-sm leading-relaxed">Period <span className="text-white font-bold">{period}</span><br/>Payroll data is now immutable.</p>
+                <p className="text-slate-400 mb-10 text-sm leading-relaxed">{t.periodLabel} <span className="text-white font-bold">{period}</span><br/>{t.immutableNote}</p>
                 <button onClick={() => { setShowSuccess(false); setStep(0); setSelectedEmpId(''); setBonus(0); }} className="w-full bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-2xl font-black tracking-widest uppercase shadow-lg shadow-blue-900/20">{t.done}</button>
             </div>
         </div>
@@ -487,7 +586,7 @@ function EmployerView({ payrollData, walletConnected, onConnect, onPaymentSucces
               <div>
                 <label className="text-[10px] font-black text-slate-500 uppercase mb-3 block tracking-widest">{t.selectEmp}</label>
                 <select className="bg-black/40 border border-white/10 rounded-2xl p-4 w-full text-white outline-none focus:border-blue-500/50 cursor-pointer appearance-none transition-all" value={selectedEmpId} onChange={(e) => setSelectedEmpId(e.target.value)}>
-                    <option value="">Select Account...</option>
+                    <option value="">{t.selectAccount}</option>
                     {EMPLOYEES.map(e => <option key={e.id} value={e.id}>{e.name} - {e.title}</option>)}
                 </select>
               </div>
@@ -507,8 +606,9 @@ function EmployerView({ payrollData, walletConnected, onConnect, onPaymentSucces
                 <div className="flex justify-between text-sm text-slate-400 font-medium"><span>{t.allowance}</span><span className="text-white font-mono tracking-tight">{emp.allowance.toLocaleString()}</span></div>
                 <div className="flex justify-between items-center text-sm pt-4 border-t border-white/5">
                   <span className="text-blue-400 font-black uppercase">{t.bonus}</span>
-                  <input type="number" value={bonus} onChange={(e) => setBonus(Number(e.target.value))} className="bg-black/60 border border-white/10 rounded-lg px-3 py-2 text-right text-white w-32 outline-none focus:border-blue-500/50 font-mono"/>
+                  <input type="number" min={0} step={1000} value={bonus} onChange={(e) => setBonus(Number(e.target.value))} className={`bg-black/60 border rounded-lg px-3 py-2 text-right text-white w-32 outline-none font-mono ${bonusInvalid ? 'border-red-500/60' : 'border-white/10 focus:border-blue-500/50'}`}/>
                 </div>
+                {bonusInvalid && <div className="text-right text-[11px] text-red-400 font-bold">{t.bonusInvalid}</div>}
               </div>
               <div className="space-y-3 border-t border-white/5 pt-6">
                 <div className="flex justify-between text-xs text-red-400/70 font-bold italic"><span>{t.labor}</span><span className="font-mono">-{laborFee.toLocaleString()}</span></div>
@@ -522,20 +622,45 @@ function EmployerView({ payrollData, walletConnected, onConnect, onPaymentSucces
             </div>
           )}
           
-          <button onClick={handleExecute} disabled={!selectedEmpId || !period || (step > 0 && step < 5)} className={`w-full py-5 rounded-2xl font-black text-lg transition-all flex justify-center items-center gap-3 tracking-widest uppercase shadow-xl active:scale-[0.98] ${(!selectedEmpId || !period) ? 'bg-slate-800 text-slate-600' : step === 5 ? 'bg-blue-600 text-white' : step > 0 ? 'bg-purple-600 text-white' : 'bg-gradient-to-r from-blue-600 to-purple-600 text-white'}`}>
-            {step === 0 && <><Activity className="w-5 h-5"/> {t.signSettle}</>}
+          <button onClick={handleExecute} disabled={!selectedEmpId || !period || bonusInvalid || !keystore || (step > 0 && step < 5)} className={`w-full py-5 rounded-2xl font-black text-lg transition-all flex justify-center items-center gap-3 tracking-widest uppercase shadow-xl active:scale-[0.98] ${(!selectedEmpId || !period || bonusInvalid) ? 'bg-slate-800 text-slate-600' : step === 5 ? 'bg-blue-600 text-white' : step > 0 ? 'bg-purple-600 text-white' : 'bg-gradient-to-r from-blue-600 to-purple-600 text-white'}`}>
+            {step === 0 && (keystore ? <><Activity className="w-5 h-5"/> {t.signSettle}</> : <><Loader2 className="animate-spin w-5 h-5" /> {t.keystoreLoading}</>)}
             {step > 0 && step < 5 && <><Loader2 className="animate-spin w-5 h-5" /> {step === 1 ? t.encrypting : step === 2 ? t.proving : step === 3 ? t.relaying : t.settling}</>}
             {step === 5 && <><CheckCircle className="w-5 h-5"/> {t.complete}</>}
           </button>
         </div>
       </div>
+
+      <div className="bg-[#111623] border border-white/5 p-8 rounded-[2.5rem] shadow-2xl mt-8">
+        <div className="flex items-center gap-3 mb-1">
+          <Eye className="w-5 h-5 text-slate-500" />
+          <h3 className="text-lg font-black text-white tracking-tight">{t.publicLedger} · {period}</h3>
+        </div>
+        <p className="text-slate-500 text-xs mb-6 font-medium">{t.publicLedgerDesc}</p>
+        {periodRecords.length === 0 ? (
+          <div className="text-center text-slate-600 text-xs font-bold uppercase tracking-widest py-6">{t.noRecordsPeriod}</div>
+        ) : (
+          <div className="space-y-3">
+            {periodRecords.map(r => (
+              <div key={r.id} className="bg-black/30 border border-white/5 rounded-2xl p-4 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-white font-black text-sm">{r.empId}</div>
+                  <div className="text-[10px] text-slate-500 font-mono truncate">{shortHash(r.hash)}</div>
+                </div>
+                <div className="flex items-center gap-2 text-slate-500 font-mono text-xs"><Lock className="w-3.5 h-3.5" /> {t.encrypted}</div>
+                <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest border ${r.status === 'Claimed' ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-amber-500/10 text-amber-400 border-amber-500/20'}`}>{statusLabel(r.status, t)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-function EmployeeView({ walletConnected, onConnect, payrollData, onWithdraw, onLogout, t }: any) {
+function EmployeeView({ walletConnected, keystore, onConnect, onLogin, payrollData, onWithdraw, onLogout, t }: any) {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [loginId, setLoginId] = useState('');
+  const [loginError, setLoginError] = useState('');
   const [showDetails, setShowDetails] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<any>(null);
   const [processingId, setProcessingId] = useState<number | null>(null);
@@ -547,10 +672,15 @@ function EmployeeView({ walletConnected, onConnect, payrollData, onWithdraw, onL
     if (foundEmp) {
       setIsLoggedIn(true);
       setLoginId(foundEmp.id);
+      setLoginError('');
+      onLogin(foundEmp.id);
     } else {
-      alert("Account Not Found!");
+      setLoginError(t.accountNotFound);
     }
   };
+
+  const myRecords = React.useMemo(() => payrollData.filter(p => p.empId === loginId), [payrollData, loginId]);
+  const revealed = useRevealed(myRecords, loginId, keystore, isLoggedIn && walletConnected);
 
   const handleWithdrawAction = (id: number) => {
     setProcessingId(id);
@@ -570,8 +700,9 @@ function EmployeeView({ walletConnected, onConnect, payrollData, onWithdraw, onL
             <div className="w-20 h-20 bg-purple-600/10 rounded-3xl flex items-center justify-center mx-auto mb-8 text-purple-400 border border-purple-500/20 shadow-inner"><LogIn className="w-10 h-10"/></div>
             <h2 className="text-3xl font-black text-white mb-8 tracking-tight">{t.employeeTitle}</h2>
             <form onSubmit={handleLogin} className="space-y-6">
-              <input type="text" placeholder={t.accId} value={loginId} onChange={e => setLoginId(e.target.value)} className="w-full bg-black/40 border border-white/10 rounded-2xl p-5 text-white outline-none focus:border-purple-500 font-medium"/>
+              <input type="text" placeholder={t.accId} value={loginId} onChange={e => { setLoginId(e.target.value); setLoginError(''); }} className="w-full bg-black/40 border border-white/10 rounded-2xl p-5 text-white outline-none focus:border-purple-500 font-medium"/>
               <input type="password" placeholder={t.pwd} className="w-full bg-black/40 border border-white/10 rounded-2xl p-5 text-white outline-none focus:border-purple-500 font-medium"/>
+              {loginError && <div className="text-red-400 text-xs font-bold">{loginError}</div>}
               <button type="submit" disabled={!loginId} className="w-full bg-purple-600 hover:bg-purple-500 text-white py-4 rounded-2xl font-black tracking-widest uppercase transition-all shadow-lg active:scale-95">{t.signIn}</button>
             </form>
           </div>
@@ -593,22 +724,26 @@ function EmployeeView({ walletConnected, onConnect, payrollData, onWithdraw, onL
     );
   }
 
-  const myRecords = payrollData.filter(p => p.empId === loginId);
   const employeeDetails = EMPLOYEES.find(e => e.id === loginId);
+  const selectedReveal = selectedRecord ? revealed[selectedRecord.id] : undefined;
 
   const generatePDF = async () => {
     try {
       const jsPDF = (await import("jspdf")).default;
       const autoTable = (await import("jspdf-autotable")).default;
       const doc = new jsPDF();
-      const d = selectedRecord.details;
+      const d = selectedReveal.details;
       doc.setFontSize(20); doc.text("On-Chain Payroll Receipt", 14, 22);
       doc.setFontSize(10); doc.text("Officially Verified", 14, 30);
       doc.text(`Employee: ${employeeDetails?.name || loginId}`, 14, 42);
       doc.text(`Period: ${selectedRecord.period}`, 14, 48);
-      doc.text(`TxHash: ${selectedRecord.hash}`, 14, 54);
+      doc.text(`Commitment: ${selectedRecord.commitment}`, 14, 54);
+      doc.text(`Salt: ${selectedReveal.salt}`, 14, 60);
+      doc.setFontSize(8);
+      doc.text("Verify: SHA-256(salt + '|' + sorted key=value pairs of the figures below) must equal the on-chain commitment.", 14, 66);
+      doc.setFontSize(10);
       (autoTable as any)(doc, {
-        startY: 62, head: [['Description', 'Amount (TWD)']],
+        startY: 72, head: [['Description', 'Amount (TWD)']],
         body: [
           ['Base Salary', d.base.toLocaleString()], 
           ['Allowance', d.allowance.toLocaleString()], 
@@ -649,14 +784,16 @@ function EmployeeView({ walletConnected, onConnect, payrollData, onWithdraw, onL
             <div key={record.id} className="bg-[#111623] border border-white/5 p-8 rounded-[2rem] flex items-center justify-between group shadow-xl hover:bg-[#161b2c] transition-all">
               <div className="flex items-center gap-6">
                 <div className="w-14 h-14 rounded-2xl bg-white/5 flex items-center justify-center text-slate-500 group-hover:text-purple-400 transition-colors border border-white/5 shadow-inner"><FileText className="w-7 h-7"/></div>
-                <div><div className="text-white font-black text-xl tracking-tight">{record.period} {t.compProof}</div><div className="text-[10px] text-slate-500 font-mono mt-1 opacity-60">ID: {record.hash}</div></div>
+                <div><div className="text-white font-black text-xl tracking-tight">{record.period} {t.compProof}</div><div className="text-[10px] text-slate-500 font-mono mt-1 opacity-60">ID: {shortHash(record.hash)}</div></div>
               </div>
               <div className="text-right flex items-center gap-10">
                 <div>
-                  <div className="text-3xl font-black text-white font-mono tracking-tighter">{record.details.net.toLocaleString()}</div>
+                  <div className="text-3xl font-black text-white font-mono tracking-tighter">
+                    {revealed[record.id] ? revealed[record.id].details.net.toLocaleString() : <span className="text-slate-600 text-base flex items-center gap-2 justify-end"><Lock className="w-4 h-4"/>{record.id in revealed ? t.decryptFailed : t.decrypting}</span>}
+                  </div>
                   <div className={`text-[10px] uppercase font-black mt-1 tracking-widest ${record.status === 'Claimed' ? 'text-green-500' : 'text-amber-500'}`}>{record.status === 'Claimed' ? t.disbursed : t.ready}</div>
                 </div>
-                <button onClick={() => { setSelectedRecord(record); setShowDetails(true); }} className="bg-white/5 hover:bg-white/10 text-white px-6 py-3 rounded-xl text-sm font-black tracking-widest uppercase transition-all border border-white/5 group-hover:scale-105 active:scale-95 shadow-sm">
+                <button disabled={!revealed[record.id]} onClick={() => { setSelectedRecord(record); setShowDetails(true); }} className="disabled:opacity-30 bg-white/5 hover:bg-white/10 text-white px-6 py-3 rounded-xl text-sm font-black tracking-widest uppercase transition-all border border-white/5 group-hover:scale-105 active:scale-95 shadow-sm">
                   {t.review}
                 </button>
               </div>
@@ -665,7 +802,7 @@ function EmployeeView({ walletConnected, onConnect, payrollData, onWithdraw, onL
         )}
       </div>
 
-      {showDetails && selectedRecord && (
+      {showDetails && selectedRecord && selectedReveal && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/95 p-4 animate-in fade-in backdrop-blur-md">
           <div className="bg-[#0f172a] border border-white/10 w-full max-w-lg rounded-[3rem] overflow-hidden shadow-[0_0_50px_rgba(0,0,0,0.5)] relative">
              <button onClick={() => setShowDetails(false)} className="absolute top-8 right-8 text-slate-500 hover:text-white transition-colors z-20"><X /></button>
@@ -681,17 +818,22 @@ function EmployeeView({ walletConnected, onConnect, payrollData, onWithdraw, onL
              
              <div className="p-10 space-y-8">
                 <div className="space-y-4">
-                  <div className="flex justify-between text-sm text-slate-400 font-bold uppercase tracking-widest"><span>{t.base}</span><span className="text-white font-mono">{selectedRecord.details.base.toLocaleString()}</span></div>
-                  <div className="flex justify-between text-sm text-slate-400 font-bold uppercase tracking-widest"><span>{t.allowance} / Bonus</span><span className="text-white font-mono">{(selectedRecord.details.allowance + selectedRecord.details.bonus).toLocaleString()}</span></div>
+                  <div className="flex justify-between text-sm text-slate-400 font-bold uppercase tracking-widest"><span>{t.base}</span><span className="text-white font-mono">{selectedReveal.details.base.toLocaleString()}</span></div>
+                  <div className="flex justify-between text-sm text-slate-400 font-bold uppercase tracking-widest"><span>{t.allowance} / Bonus</span><span className="text-white font-mono">{(selectedReveal.details.allowance + selectedReveal.details.bonus).toLocaleString()}</span></div>
                   <div className="h-px bg-white/10 my-6" />
                   
-                  <div className="flex justify-between text-xs text-red-400/80 font-black italic uppercase tracking-tighter"><span>{t.labor}</span><span className="font-mono">-{selectedRecord.details.labor.toLocaleString()}</span></div>
-                  <div className="flex justify-between text-xs text-red-400/80 font-black italic uppercase tracking-tighter"><span>{t.health}</span><span className="font-mono">-{selectedRecord.details.health.toLocaleString()}</span></div>
-                  <div className="flex justify-between text-xs text-red-400/80 font-black italic uppercase tracking-tighter"><span>{t.tax}</span><span className="font-mono">-{selectedRecord.details.tax.toLocaleString()}</span></div>
+                  <div className="flex justify-between text-xs text-red-400/80 font-black italic uppercase tracking-tighter"><span>{t.labor}</span><span className="font-mono">-{selectedReveal.details.labor.toLocaleString()}</span></div>
+                  <div className="flex justify-between text-xs text-red-400/80 font-black italic uppercase tracking-tighter"><span>{t.health}</span><span className="font-mono">-{selectedReveal.details.health.toLocaleString()}</span></div>
+                  <div className="flex justify-between text-xs text-red-400/80 font-black italic uppercase tracking-tighter"><span>{t.tax}</span><span className="font-mono">-{selectedReveal.details.tax.toLocaleString()}</span></div>
                   
-                  <div className="flex justify-between items-center pt-8 border-t border-white/10 mt-8">
+                  <div className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest pt-4 ${selectedReveal.verified ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {selectedReveal.verified ? <ShieldCheck className="w-4 h-4"/> : <ShieldAlert className="w-4 h-4"/>}
+                    {selectedReveal.verified ? t.commitmentOk : t.commitmentBad}
+                  </div>
+
+                  <div className="flex justify-between items-center pt-8 border-t border-white/10 mt-4">
                     <span className="text-slate-300 font-black tracking-widest uppercase text-xs">{t.net}</span>
-                    <span className="text-cyan-400 text-4xl font-black drop-shadow-[0_0_15px_rgba(34,211,238,0.4)]">{selectedRecord.details.net.toLocaleString()} TWD</span>
+                    <span className="text-cyan-400 text-4xl font-black drop-shadow-[0_0_15px_rgba(34,211,238,0.4)]">{selectedReveal.details.net.toLocaleString()} TWD</span>
                   </div>
                 </div>
 
@@ -719,7 +861,7 @@ function EmployeeView({ walletConnected, onConnect, payrollData, onWithdraw, onL
   );
 }
 
-function AuditorView({ payrollData, walletConnected, onConnect, onNavigateBack, t }: any) {
+function AuditorView({ payrollData, keystore, walletConnected, onConnect, onNavigateBack, t }: any) {
   const [showDetails, setShowDetails] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<any>(null);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -732,22 +874,33 @@ function AuditorView({ payrollData, walletConnected, onConnect, onNavigateBack, 
     }
   }, [walletConnected, authSuccess]);
 
+  useEffect(() => {
+    if (!walletConnected) setAuthSuccess(false);
+  }, [walletConnected]);
+
+  const revealed = useRevealed(payrollData, AUDITOR_ID, keystore, authSuccess);
+  const selectedReveal = selectedRecord ? revealed[selectedRecord.id] : undefined;
+
   const downloadCSV = () => {
-    const headers = ["Transaction ID", "Employee", "Period", "Base Salary", "Allowances", "Bonus", "Labor Ins.", "Health Ins.", "Tax", "Net Payout", "Status", "Blockchain Hash"];
-    const rows = payrollData.map(r => [
-      r.id, r.empId, r.period, 
-      r.details.base, r.details.allowance, r.details.bonus, 
-      r.details.labor, r.details.health, r.details.tax, 
-      r.details.net, r.status, r.hash
-    ]);
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
+    const headers = ["Transaction ID", "Employee", "Period", "Base Salary", "Allowances", "Bonus", "Labor Ins.", "Health Ins.", "Tax", "Net Payout", "Status", "Commitment", "Commitment Verified"];
+    const rows = payrollData.map(r => {
+      const d = revealed[r.id]?.details;
+      return [
+        r.id, r.empId, r.period,
+        d?.base ?? '', d?.allowance ?? '', d?.bonus ?? '',
+        d?.labor ?? '', d?.health ?? '', d?.tax ?? '',
+        d?.net ?? '', r.status, r.commitment, revealed[r.id]?.verified ? 'YES' : 'NO'
+      ];
+    });
+    const csv = [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "Audit_Compliance_Log.csv");
+    link.href = url;
+    link.download = "Audit_Compliance_Log.csv";
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -816,14 +969,16 @@ function AuditorView({ payrollData, walletConnected, onConnect, onNavigateBack, 
                       <tr key={record.id} className="hover:bg-white/[0.02] transition-colors group">
                         <td className="p-6 text-white font-black tracking-tight">{record.empId}</td>
                         <td className="p-6 text-slate-400 font-mono text-xs">{record.period}</td>
-                        <td className="p-6 font-mono text-cyan-400 text-lg font-black">{record.details.net.toLocaleString()}</td>
+                        <td className="p-6 font-mono text-cyan-400 text-lg font-black">
+                          {revealed[record.id] ? revealed[record.id].details.net.toLocaleString() : <span className="text-slate-600 text-xs flex items-center gap-2"><Lock className="w-3.5 h-3.5"/>{record.id in revealed ? t.decryptFailed : t.decrypting}</span>}
+                        </td>
                         <td className="p-6">
                           <span className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border ${record.status === 'Claimed' ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-amber-500/10 text-amber-400 border-amber-500/20'}`}>
-                            {record.status}
+                            {statusLabel(record.status, t)}
                           </span>
                         </td>
                         <td className="p-6 text-right">
-                           <button onClick={() => { setSelectedRecord(record); setShowDetails(true); }} className="bg-white/5 hover:bg-white/10 text-emerald-400 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border border-white/5">
+                           <button disabled={!revealed[record.id]} onClick={() => { setSelectedRecord(record); setShowDetails(true); }} className="disabled:opacity-30 bg-white/5 hover:bg-white/10 text-emerald-400 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border border-white/5">
                              {t.inspect}
                            </button>
                         </td>
@@ -837,36 +992,38 @@ function AuditorView({ payrollData, walletConnected, onConnect, onNavigateBack, 
         )}
       </div>
 
-      {showDetails && selectedRecord && (
+      {showDetails && selectedRecord && selectedReveal && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/95 p-4 animate-in fade-in backdrop-blur-lg">
           <div className="bg-[#0f172a] border border-emerald-500/20 w-full max-w-lg rounded-[3rem] overflow-hidden shadow-2xl relative">
              <button onClick={() => setShowDetails(false)} className="absolute top-8 right-8 text-slate-500 hover:text-white transition-colors"><X /></button>
              
              <div className="bg-emerald-900/10 p-10 border-b border-white/5">
                <h3 className="text-3xl font-black text-white tracking-tighter mb-4">{t.cryptoProof}</h3>
-               <div className="flex items-center gap-3 text-xs font-black uppercase tracking-widest text-emerald-400">
-                 <Shield className="w-5 h-5"/> {t.verifiedZk}
+               <div className={`flex items-center gap-3 text-xs font-black uppercase tracking-widest ${selectedReveal.verified ? 'text-emerald-400' : 'text-red-400'}`}>
+                 {selectedReveal.verified ? <ShieldCheck className="w-5 h-5"/> : <ShieldAlert className="w-5 h-5"/>}
+                 {selectedReveal.verified ? t.commitmentOk : t.commitmentBad}
                </div>
                <div className="mt-6 text-[9px] text-slate-500 font-mono break-all bg-black/60 p-4 rounded-2xl border border-white/5 shadow-inner leading-relaxed">
-                 HASH: {selectedRecord.hash}
+                 {t.commitment}: {selectedRecord.commitment}
+                 <br/>{t.sealedFor}: {Object.keys(selectedRecord.sealed || {}).join(', ')}
                </div>
              </div>
              
              <div className="p-10 space-y-5">
                 <div className="flex justify-between text-xs font-black uppercase tracking-widest text-slate-500 border-b border-white/5 pb-3"><span>{t.empId}</span><span className="text-white font-black">{selectedRecord.empId}</span></div>
                 <div className="flex justify-between text-xs font-black uppercase tracking-widest text-slate-500 border-b border-white/5 pb-3"><span>{t.disbPeriod}</span><span className="text-white">{selectedRecord.period}</span></div>
-                <div className="flex justify-between text-xs font-black uppercase tracking-widest text-slate-500 border-b border-white/5 pb-3"><span>{t.colStatus}</span><span className={selectedRecord.status === 'Claimed' ? 'text-green-400' : 'text-amber-400'}>{selectedRecord.status}</span></div>
+                <div className="flex justify-between text-xs font-black uppercase tracking-widest text-slate-500 border-b border-white/5 pb-3"><span>{t.colStatus}</span><span className={selectedRecord.status === 'Claimed' ? 'text-green-400' : 'text-amber-400'}>{statusLabel(selectedRecord.status, t)}</span></div>
                 
                 <div className="pt-6 space-y-3">
-                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.base}</span><span className="font-mono text-white">{selectedRecord.details.base.toLocaleString()}</span></div>
-                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.allowance} / Bonus</span><span className="font-mono text-white">{(selectedRecord.details.allowance + selectedRecord.details.bonus).toLocaleString()}</span></div>
-                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.labor}</span><span className="font-mono text-red-400/60">-{selectedRecord.details.labor.toLocaleString()}</span></div>
-                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.health}</span><span className="font-mono text-red-400/60">-{selectedRecord.details.health.toLocaleString()}</span></div>
-                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.tax}</span><span className="font-mono text-red-400/60">-{selectedRecord.details.tax.toLocaleString()}</span></div>
+                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.base}</span><span className="font-mono text-white">{selectedReveal.details.base.toLocaleString()}</span></div>
+                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.allowance} / Bonus</span><span className="font-mono text-white">{(selectedReveal.details.allowance + selectedReveal.details.bonus).toLocaleString()}</span></div>
+                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.labor}</span><span className="font-mono text-red-400/60">-{selectedReveal.details.labor.toLocaleString()}</span></div>
+                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.health}</span><span className="font-mono text-red-400/60">-{selectedReveal.details.health.toLocaleString()}</span></div>
+                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest"><span>{t.tax}</span><span className="font-mono text-red-400/60">-{selectedReveal.details.tax.toLocaleString()}</span></div>
                   
                   <div className="flex justify-between items-center pt-8 border-t border-white/10 mt-8">
                     <span className="text-slate-300 font-black tracking-widest uppercase text-xs">{t.netSettled}</span>
-                    <span className="text-emerald-400 text-3xl font-black font-mono">{selectedRecord.details.net.toLocaleString()} TWD</span>
+                    <span className="text-emerald-400 text-3xl font-black font-mono">{selectedReveal.details.net.toLocaleString()} TWD</span>
                   </div>
                 </div>
 
