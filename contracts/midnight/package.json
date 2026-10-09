@@ -1,0 +1,20 @@
+{
+  "name": "@payroll/midnight-contract",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "compact": "compact compile +0.31.1 src/payroll.compact src/managed/payroll",
+    "compact:fast": "compact compile +0.31.1 --skip-zk src/payroll.compact src/managed/payroll",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.16.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

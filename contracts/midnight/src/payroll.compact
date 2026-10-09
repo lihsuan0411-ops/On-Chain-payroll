@@ -1,0 +1,158 @@
+// On-Chain Payroll: private salary ledger on Midnight.
+//
+// What is public on the ledger:
+//   - the employer and auditor public keys (hashes of their secret keys)
+//   - one record per payslip: employee public key, period, a hiding commitment
+//     to the figures, and whether the employee has claimed it
+//   - a running hash of every commitment issued per period, anchored on Cardano
+//   - the aggregate budget minted per period as the shielded pay token
+//
+// What stays private:
+//   - every salary figure (base, allowance, bonus, deductions, net)
+//   - the secret keys of all parties
+//   - which shielded coins went to which employee (paid wallet-to-wallet)
+//
+// The issuePayslip proof guarantees the deductions and net pay follow the
+// statutory rates below, without revealing any of the amounts.
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+export struct PayslipDetails {
+  base: Uint<64>;
+  allowance: Uint<64>;
+  bonus: Uint<64>;
+  labor: Uint<64>;
+  health: Uint<64>;
+  tax: Uint<64>;
+  net: Uint<64>;
+}
+
+export struct PayslipOpening {
+  details: PayslipDetails;
+  salt: Bytes<32>;
+}
+
+export enum PayslipStatus { issued, claimed }
+
+export struct PayslipRecord {
+  employee: Bytes<32>;
+  period: Uint<32>;
+  commitment: Bytes<32>;
+  status: PayslipStatus;
+}
+
+export sealed ledger employer: Bytes<32>;
+export sealed ledger auditor: Bytes<32>;
+
+// payslipId(employee, period) -> record
+export ledger payslips: Map<Bytes<32>, PayslipRecord>;
+// period -> hash chain over every commitment issued in that period
+export ledger periodRoots: Map<Uint<32>, Bytes<32>>;
+// period -> number of payslips issued (re-issues included)
+export ledger periodIssued: Map<Uint<32>, Uint<32>>;
+// period -> shielded pay tokens minted to the employer for that period
+export ledger periodBudgets: Map<Uint<32>, Uint<64>>;
+// period -> auditor sign-off
+export ledger auditedPeriods: Set<Uint<32>>;
+export ledger mintCount: Counter;
+
+// Secret key of whoever is calling (employer, employee or auditor).
+witness localSecretKey(): Bytes<32>;
+// Opening of the payslip being issued or claimed, held in the caller's private state.
+witness payslipOpening(id: Bytes<32>): PayslipOpening;
+
+constructor(auditorPk: Bytes<32>) {
+  employer = disclose(publicKey(localSecretKey()));
+  auditor = disclose(auditorPk);
+}
+
+// Statutory rates, in per-mille: labor 25 (2.5%), health 15 (1.5%), tax 50 (5%).
+// Each deduction must equal floor(amount * rate / 1000), checked without division.
+circuit isFloorPerMille(deduction: Uint<64>, amount: Uint<64>, rate: Uint<16>): Boolean {
+  const scaled = amount * rate;
+  return deduction * 1000 <= scaled && scaled < (deduction + 1) * 1000;
+}
+
+circuit assertValidCalculation(d: PayslipDetails): [] {
+  const gross = d.base + d.allowance + d.bonus;
+  assert(isFloorPerMille(d.labor, d.base, 25), "Labor insurance does not match 2.5% of base");
+  assert(isFloorPerMille(d.health, d.base, 15), "Health insurance does not match 1.5% of base");
+  assert(isFloorPerMille(d.tax, gross as Uint<64>, 50), "Income tax does not match 5% of gross");
+  assert(d.net + d.labor + d.health + d.tax == gross, "Net pay does not equal gross minus deductions");
+}
+
+circuit assertEmployer(): [] {
+  assert(publicKey(localSecretKey()) == employer, "Caller is not the employer");
+}
+
+export pure circuit publicKey(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "payroll:pk:"), sk]);
+}
+
+export pure circuit payslipId(employee: Bytes<32>, period: Uint<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "payroll:slip:"), employee, period as Field as Bytes<32>]);
+}
+
+export pure circuit payslipCommitment(opening: PayslipOpening): Bytes<32> {
+  return persistentCommit<PayslipDetails>(opening.details, opening.salt);
+}
+
+export pure circuit payTokenDomain(): Bytes<32> {
+  return pad(32, "payroll:pTWD");
+}
+
+// Employer mints the period's payroll budget as shielded pay tokens to its own
+// wallet. Only the aggregate is public; it matches the reserve escrowed on Cardano.
+export circuit fundPeriod(period: Uint<32>, budget: Uint<64>): [] {
+  assertEmployer();
+  const p = disclose(period);
+  const amount = disclose(budget);
+  assert(!periodBudgets.member(p), "Period already funded");
+  const nonce = evolveNonce(mintCount, pad(32, "payroll:mint"));
+  mintCount.increment(1);
+  mintShieldedToken(payTokenDomain(), amount, nonce, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()));
+  periodBudgets.insert(p, amount);
+}
+
+// Employer publishes a payslip. The proof shows the hidden figures satisfy the
+// payroll rules and match the published commitment.
+export circuit issuePayslip(employee: Bytes<32>, period: Uint<32>): [] {
+  assertEmployer();
+  const emp = disclose(employee);
+  const p = disclose(period);
+  const id = payslipId(emp, p);
+  if (payslips.member(id)) {
+    assert(payslips.lookup(id).status == PayslipStatus.issued, "Payslip already claimed");
+  }
+  const opening = payslipOpening(id);
+  assertValidCalculation(opening.details);
+  const commitment = disclose(payslipCommitment(opening));
+  payslips.insert(id, PayslipRecord { employee: emp, period: p, commitment: commitment, status: PayslipStatus.issued });
+
+  const prev = periodRoots.member(p) ? periodRoots.lookup(p) : default<Bytes<32>>;
+  periodRoots.insert(p, persistentHash<Vector<2, Bytes<32>>>([prev, commitment]));
+  const issued = periodIssued.member(p) ? periodIssued.lookup(p) : 0 as Uint<32>;
+  periodIssued.insert(p, (issued + 1) as Uint<32>);
+}
+
+// Employee signs for a payslip: proves they own the employee key and hold the
+// opening of the published commitment, without revealing either.
+export circuit claimPayslip(period: Uint<32>): [] {
+  const p = disclose(period);
+  const id = disclose(payslipId(publicKey(localSecretKey()), p));
+  assert(payslips.member(id), "No payslip for this employee and period");
+  const record = payslips.lookup(id);
+  assert(record.status == PayslipStatus.issued, "Payslip already claimed");
+  assert(payslipCommitment(payslipOpening(id)) == record.commitment, "Opening does not match commitment");
+  payslips.insert(id, PayslipRecord { ...record, status: PayslipStatus.claimed });
+}
+
+// Auditor signs off on a period after reviewing the disclosed payslips.
+export circuit attestPeriod(period: Uint<32>): [] {
+  assert(publicKey(localSecretKey()) == auditor, "Caller is not the auditor");
+  const p = disclose(period);
+  assert(periodIssued.member(p), "Nothing issued for this period");
+  auditedPeriods.insert(p);
+}
