@@ -5,6 +5,7 @@
 // Panels showing the Midnight contract and the Cardano reserve for a period.
 
 import React, { useEffect, useState } from 'react';
+import { describeError } from '@/lib/chain/errors';
 import { Anchor, Copy, Cpu, KeyRound, Landmark, Loader2, Lock, RefreshCw, ScrollText, ShieldAlert, ShieldCheck, Stamp } from 'lucide-react';
 
 const short = (h: string, a = 8, b = 6) => (h && h.length > a + b + 3 ? `${h.slice(0, a)}...${h.slice(-b)}` : h || '—');
@@ -48,7 +49,7 @@ export function ContractPanel({ chain, summary, period, periodU, walletConnected
       await fn();
       await chain.refresh();
     } catch (e) {
-      onError(e.message || String(e));
+      onError(describeError(e));
     } finally {
       setWorking('');
     }
@@ -86,12 +87,12 @@ export function ContractPanel({ chain, summary, period, periodU, walletConnected
           <button onClick={onConnect} className="w-full bg-emerald-600/10 border border-emerald-500/30 text-emerald-400 py-3 rounded-xl text-xs font-black uppercase tracking-widest">{t.connectLace}</button>
         ) : (
           <div className="space-y-3">
-            <button disabled={chain.busy} onClick={() => chain.deployPreprod().catch(e => onError(e.message || String(e)))} className="w-full bg-gradient-to-r from-indigo-600 to-emerald-600 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:opacity-50">
+            <button disabled={chain.busy} onClick={() => chain.deployPreprod().catch(e => onError(describeError(e)))} className="w-full bg-gradient-to-r from-indigo-600 to-emerald-600 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:opacity-50">
               {chain.busy && <Loader2 className="w-4 h-4 animate-spin" />} {t.deployContract}
             </button>
             <div className="flex gap-2">
               <input value={joinAddress} onChange={e => setJoinAddress(e.target.value)} placeholder={t.contractAddressPh} className="flex-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs font-mono text-white outline-none focus:border-emerald-500/50" />
-              <button disabled={!joinAddress || chain.busy} onClick={() => chain.joinPreprod(joinAddress).catch(e => onError(e.message || String(e)))} className="bg-white/5 border border-white/10 text-white px-4 rounded-xl text-xs font-black uppercase disabled:opacity-40">{t.joinContract}</button>
+              <button disabled={!joinAddress || chain.busy} onClick={() => chain.joinPreprod(joinAddress).catch(e => onError(describeError(e)))} className="bg-white/5 border border-white/10 text-white px-4 rounded-xl text-xs font-black uppercase disabled:opacity-40">{t.joinContract}</button>
             </div>
           </div>
         )
@@ -157,7 +158,7 @@ export function ReservePanel({ chain, summary, period, periodU, readOnly, onErro
       const cw = await import('@/lib/chain/cardano-wallet');
       setReserve(chain.mode === 'local' ? cw.localReserve.find(chain.contractAddress, periodNum) : await cw.findReserve(chain.contractAddress, periodNum));
     } catch (e) {
-      onError?.(e.message || String(e));
+      onError?.(describeError(e));
     } finally {
       setLoading(false);
     }
@@ -177,7 +178,7 @@ export function ReservePanel({ chain, summary, period, periodU, readOnly, onErro
       if (chain.mode === 'preprod') await new Promise(r => setTimeout(r, 4000));
       await load();
     } catch (e) {
-      onError?.(e.message || String(e));
+      onError?.(describeError(e));
     } finally {
       setWorking(false);
     }
@@ -303,7 +304,7 @@ export function UnlockKeys({ chain, role, holder, onError, onUnlocked, t }: any)
       setUnlocked(pk);
       onUnlocked?.(pk);
     } catch (e) {
-      onError(e.message || String(e));
+      onError(describeError(e));
     } finally {
       setBusy(false);
     }

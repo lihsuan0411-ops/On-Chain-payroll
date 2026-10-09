@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { usePayrollChain, AUDITOR_HOLDER } from '@/lib/chain/use-payroll-chain';
 import { ModeSwitch, ContractPanel, ReservePanel, UnlockKeys } from './chain-panels';
+import { describeError } from '@/lib/chain/errors';
 import { DEMO_SALARY_BANDS, LEVEL_NAMES } from '@/contracts/midnight/src/payroll-math';
 
 type UserRole = 'landing' | 'employer' | 'employee' | 'auditor';
@@ -34,7 +35,7 @@ const PERIOD_U = 202605n;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const shortHash = (h: string) => h ? `${h.slice(0, 10)}...${h.slice(-6)}` : '';
 const fmt = (v: bigint | number) => Number(v).toLocaleString();
-const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const errorText = (e: unknown) => describeError(e);
 // Chain modules load WASM, so they are only imported on the client when needed.
 const chainCore = () => import('@/lib/chain/core');
 
