@@ -5,7 +5,7 @@
 // Panels showing the Midnight contract and the Cardano reserve for a period.
 
 import React, { useEffect, useState } from 'react';
-import { Anchor, Copy, Cpu, Landmark, Loader2, Lock, RefreshCw, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { Anchor, Copy, Cpu, KeyRound, Landmark, Loader2, Lock, RefreshCw, ScrollText, ShieldAlert, ShieldCheck, Stamp } from 'lucide-react';
 
 const short = (h: string, a = 8, b = 6) => (h && h.length > a + b + 3 ? `${h.slice(0, a)}...${h.slice(-b)}` : h || '—');
 const fmt = (v: bigint | number | null | undefined) => (v === null || v === undefined ? '—' : Number(v).toLocaleString());
@@ -40,19 +40,29 @@ function Row({ label, children }: any) {
 export function ContractPanel({ chain, summary, period, periodU, walletConnected, onConnect, onError, canFund, t }: any) {
   const [joinAddress, setJoinAddress] = useState('');
   const [budget, setBudget] = useState(250000);
-  const [funding, setFunding] = useState(false);
+  const [working, setWorking] = useState('');
 
-  const fund = async () => {
-    setFunding(true);
+  const act = (name: string, fn: () => Promise<any>) => async () => {
+    setWorking(name);
     try {
-      await chain.backend.fundPeriod(periodU, BigInt(Math.max(0, Math.floor(budget))));
+      await fn();
       await chain.refresh();
     } catch (e) {
       onError(e.message || String(e));
     } finally {
-      setFunding(false);
+      setWorking('');
     }
   };
+
+  const fund = act('fund', () => chain.backend.fundPeriod(periodU, BigInt(Math.max(0, Math.floor(budget)))));
+  const close = act('close', () => chain.backend.closePeriod(periodU));
+  // Publishes the rules commitment and shares the rules themselves with the auditor only.
+  const publishRules = act('rules', async () => {
+    await chain.backend.setSalaryRules();
+    const core = await import('@/lib/chain/core');
+    await core.postRules(chain.contractAddress, core.employerBook(chain.contractAddress).rules, 'AUDITOR', chain.keystore);
+  });
+  const Spinner = ({ on }: any) => (working === on ? <Loader2 className="w-3 h-3 animate-spin" /> : null);
 
   const needsContract = chain.mode === 'preprod' && !chain.backend;
 
@@ -95,15 +105,27 @@ export function ContractPanel({ chain, summary, period, periodU, walletConnected
           <Row label={`${t.issuedCount} · ${period}`}>{summary.issued}</Row>
           <Row label={t.periodRoot}>{short(summary.root ?? '')}</Row>
           <Row label={t.budgetLabel}>{summary.budget === null ? <span className="text-slate-500">{t.notFunded}</span> : `${fmt(summary.budget)} pTWD`}</Row>
+          <Row label={t.rulesLabel}>{summary.rulesPublished ? <span className="text-emerald-400">{t.rulesPublished}</span> : <span className="text-amber-400">{t.rulesMissing}</span>}</Row>
+          <Row label={t.closedTotal}>{summary.closedTotal === null ? <span className="text-slate-500">{t.periodOpen}</span> : `${fmt(summary.closedTotal)} pTWD`}</Row>
           <Row label={t.colStatus}>{summary.audited ? <span className="text-emerald-400">{t.audited}</span> : <span className="text-amber-400">{t.notAudited}</span>}</Row>
 
+          {canFund && !summary.rulesPublished && (
+            <button disabled={!!working} onClick={publishRules} className="w-full mt-4 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:opacity-50">
+              <Spinner on="rules" /><ScrollText className="w-3.5 h-3.5" /> {t.publishRules}
+            </button>
+          )}
           {canFund && summary.budget === null && (
             <div className="flex gap-2 mt-4">
               <input type="number" min={0} step={10000} value={budget} onChange={e => setBudget(Number(e.target.value))} className="flex-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs font-mono text-white text-right outline-none focus:border-indigo-500/50" />
-              <button disabled={funding} onClick={fund} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 rounded-xl text-xs font-black uppercase tracking-widest flex items-center gap-2 disabled:opacity-50">
-                {funding && <Loader2 className="w-3 h-3 animate-spin" />} {t.fundPeriod}
+              <button disabled={!!working} onClick={fund} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 rounded-xl text-xs font-black uppercase tracking-widest flex items-center gap-2 disabled:opacity-50">
+                <Spinner on="fund" /> {t.fundPeriod}
               </button>
             </div>
+          )}
+          {canFund && summary.issued > 0 && summary.budget !== null && summary.closedTotal === null && (
+            <button disabled={!!working} onClick={close} className="w-full mt-4 bg-white/5 border border-indigo-500/30 text-indigo-300 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:opacity-50">
+              <Spinner on="close" /><Stamp className="w-3.5 h-3.5" /> {t.closePeriod}
+            </button>
           )}
           {chain.mode === 'local' && canFund && (
             <button onClick={() => window.confirm(t.resetConfirm) && chain.resetLocal()} className="mt-4 text-[10px] text-slate-600 hover:text-slate-300 font-black uppercase tracking-widest flex items-center gap-1">
@@ -251,6 +273,63 @@ export function ReservePanel({ chain, summary, period, periodU, readOnly, onErro
             </button>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Preprod: derive this role's Midnight key and view key from a CIP-30 wallet
+ * signature (lib/chain/wallet-keys.ts), instead of the demo keys in this browser.
+ */
+export function UnlockKeys({ chain, role, holder, onError, onUnlocked, t }: any) {
+  const [wallets, setWallets] = useState([]);
+  const [unlocked, setUnlocked] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    import('@/lib/chain/cardano-wallet').then(cw => setWallets(cw.cardanoWallets()));
+    import('@/lib/chain/core').then(core => core.hasDerivedSecretKey(role) && setUnlocked(core.toHex(core.publicKeyFor(role))));
+  }, [role]);
+
+  const unlock = async (walletId: string) => {
+    setBusy(true);
+    try {
+      const [cw, wk] = await Promise.all([import('@/lib/chain/cardano-wallet'), import('@/lib/chain/wallet-keys')]);
+      const pk = await wk.unlockRole(await cw.connectSigner(walletId), role, holder);
+      await chain.reloadKeys();
+      setUnlocked(pk);
+      onUnlocked?.(pk);
+    } catch (e) {
+      onError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="bg-[#111623] border border-amber-500/20 p-6 rounded-[2rem] shadow-2xl mt-8">
+      <div className="flex items-center gap-3 mb-1">
+        <KeyRound className="w-5 h-5 text-amber-400" />
+        <h3 className="text-base font-black text-white tracking-tight">{t.unlockTitle}</h3>
+      </div>
+      {unlocked ? (
+        <div className="text-xs text-emerald-400 font-bold flex items-center gap-2 mt-2"><ShieldCheck className="w-4 h-4" /> {t.unlocked} · <span className="font-mono text-slate-400">{short(unlocked)}</span></div>
+      ) : (
+        <>
+          <p className="text-slate-500 text-xs mb-4 font-medium">{t.unlockDesc}</p>
+          {wallets.length === 0 ? (
+            <div className="text-xs text-slate-500">{t.noCardanoWallet}</div>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {wallets.map(w => (
+                <button key={w.id} disabled={busy} onClick={() => unlock(w.id)} className="bg-white/5 border border-white/10 hover:border-amber-500/40 text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-2 disabled:opacity-50">
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <img src={w.icon} alt="" className="w-4 h-4" />} {w.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

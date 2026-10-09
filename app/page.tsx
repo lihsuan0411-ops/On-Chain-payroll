@@ -10,16 +10,20 @@ import {
   Lock, ShieldAlert, ShieldCheck, Stamp
 } from 'lucide-react';
 import { usePayrollChain, AUDITOR_HOLDER } from '@/lib/chain/use-payroll-chain';
-import { ModeSwitch, ContractPanel, ReservePanel } from './chain-panels';
+import { ModeSwitch, ContractPanel, ReservePanel, UnlockKeys } from './chain-panels';
+import { DEMO_SALARY_BANDS, LEVEL_NAMES } from '@/contracts/midnight/src/payroll-math';
 
 type UserRole = 'landing' | 'employer' | 'employee' | 'auditor';
 type WalletType = 'metamask' | 'eternl' | 'lace' | '';
 type Lang = 'en' | 'zh';
 
+// Demo org chart: one employee per salary level (bands in contracts/midnight/src/payroll-math.ts).
 const EMPLOYEES = [
-  { id: "Aden", name: "Aden", title: "Operation Intern", address: "0x9E3...4A21", base: 40000, allowance: 2000 },
-  { id: "Alice", name: "Alice", title: "Senior Dev", address: "0x71C...976F", base: 75000, allowance: 5000 },
-  { id: "Bob", name: "Bob", title: "Product Lead", address: "0x3B2...1A9E", base: 90000, allowance: 8000 },
+  { id: "Aden", name: "Aden", title: "Operation Intern", level: 1, address: "0x9E3...4A21", base: 40000, allowance: 2000 },
+  { id: "Chloe", name: "Chloe", title: "Product Designer", level: 2, address: "0x5D8...0B37", base: 52000, allowance: 3000 },
+  { id: "Alice", name: "Alice", title: "Senior Dev", level: 3, address: "0x71C...976F", base: 75000, allowance: 5000 },
+  { id: "Bob", name: "Bob", title: "Product Lead", level: 4, address: "0x3B2...1A9E", base: 90000, allowance: 8000 },
+  { id: "David", name: "David", title: "CFO", level: 5, address: "0xA41...7C2D", base: 150000, allowance: 15000 },
 ];
 const EMPLOYEE_IDS = EMPLOYEES.map(e => e.id);
 
@@ -181,7 +185,25 @@ const T = {
     auditorMismatch: "This key is not the auditor registered in the payroll contract.",
     laceWallet: "Lace (Midnight)",
     shieldedRegistered: "Payout address registered",
-    zkVerified: "Verified against Midnight commitment"
+    zkVerified: "Verified against Midnight commitment",
+    levelLabel: "Salary level",
+    bandLabel: "Band",
+    bandBase: "Base salary is outside this level's band: the ZK proof will be rejected.",
+    bandAllowance: "Allowance exceeds this level's band: the ZK proof will be rejected.",
+    bandBonus: "Bonus exceeds this level's band: the ZK proof will be rejected.",
+    rulesLabel: "Salary rules",
+    rulesPublished: "Committed on chain",
+    rulesMissing: "Not published",
+    publishRules: "Publish Salary Rules",
+    closedTotal: "Period total",
+    periodOpen: "Open (hidden)",
+    closePeriod: "Close Period (prove total ≤ budget)",
+    unlockTitle: "Unlock Keys with Your Wallet",
+    unlockDesc: "Sign a message with a Cardano wallet (Lace, Eternl…). Your payroll keys are derived from the signature, so nothing secret is stored and you can recover them on any device.",
+    unlocked: "Keys derived from your wallet signature",
+    rulesVerified: "Salary rules match the on-chain commitment",
+    withinBand: "Within the band for level",
+    outOfBand: "Outside the band for level"
   },
   zh: {
     navTitle: "鏈上薪資系統",
@@ -329,7 +351,25 @@ const T = {
     auditorMismatch: "此金鑰不是薪資合約登記的審計員。",
     laceWallet: "Lace (Midnight)",
     shieldedRegistered: "已登記收款地址",
-    zkVerified: "已比對 Midnight 承諾值"
+    zkVerified: "已比對 Midnight 承諾值",
+    levelLabel: "薪資職級",
+    bandLabel: "區間",
+    bandBase: "本薪不在此職級的區間內，零知識證明會被拒絕。",
+    bandAllowance: "津貼超過此職級上限，零知識證明會被拒絕。",
+    bandBonus: "獎金超過此職級上限，零知識證明會被拒絕。",
+    rulesLabel: "薪資規則",
+    rulesPublished: "已上鏈承諾",
+    rulesMissing: "尚未公布",
+    publishRules: "公布薪資規則",
+    closedTotal: "本期總額",
+    periodOpen: "未結算（隱藏）",
+    closePeriod: "期末結算（證明總額 ≤ 預算）",
+    unlockTitle: "用錢包解鎖金鑰",
+    unlockDesc: "用 Cardano 錢包（Lace、Eternl…）簽一則訊息。薪資金鑰由簽章推導而來，不必儲存任何機密，換裝置也能重新取回。",
+    unlocked: "已由錢包簽章推導金鑰",
+    rulesVerified: "薪資規則與鏈上承諾一致",
+    withinBand: "符合職級區間",
+    outOfBand: "超出職級區間"
   }
 };
 
@@ -574,7 +614,7 @@ function useOpenings(chain: any, views: any[], holder: string, enabled: boolean)
 const statusLabel = (status: string, t: any) => status === 'Claimed' ? t.statusClaimed : t.statusPending;
 
 function usePeriodSummary(chain: any) {
-  const [summary, setSummary] = useState({ root: null, issued: 0, budget: null, audited: false });
+  const [summary, setSummary] = useState({ root: null, issued: 0, budget: null, closedTotal: null, audited: false, rulesPublished: false });
   useEffect(() => {
     if (!chain.ledger) return;
     chainCore().then(core => setSummary(core.periodSummary(chain.ledger, PERIOD_U)));
@@ -629,6 +669,7 @@ function EmployerView({ chain, walletConnected, onConnect, onSetAlert, onNavigat
   const [selectedEmpId, setSelectedEmpId] = useState('');
   const period = PERIOD;
   const [bonus, setBonus] = useState(0);
+  const [level, setLevel] = useState(0);
   const [step, setStep] = useState(0); 
   const [showSuccess, setShowSuccess] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -641,6 +682,12 @@ function EmployerView({ chain, walletConnected, onConnect, onSetAlert, onNavigat
   const taxFee = emp ? Math.floor((emp.base + emp.allowance + bonus) * 0.05) : 0;
   const totalNet = emp ? (emp.base + emp.allowance + bonus - laborFee - healthFee - taxFee) : 0;
   const bonusInvalid = !Number.isInteger(bonus) || bonus < 0;
+  // Mirrors assertWithinRules so the employer sees why a proof would be refused.
+  const band = DEMO_SALARY_BANDS[level - 1];
+  const bandWarning = emp && band && (
+    BigInt(emp.base) < band.minBase || BigInt(emp.base) > band.maxBase ? t.bandBase
+    : BigInt(emp.allowance) > band.maxAllowance ? t.bandAllowance
+    : BigInt(bonus) > band.maxBonus ? t.bandBonus : null);
   const periodRecords = chain.views.filter(r => r.period === period);
   const ready = !!chain.backend && !!chain.keystore;
 
@@ -657,8 +704,8 @@ function EmployerView({ chain, walletConnected, onConnect, onSetAlert, onNavigat
     try {
       const core = await chainCore();
       setStep(1);
-      const opening = core.newOpening(emp.base, emp.allowance, bonus);
-      const employeePk = core.publicKeyFor(core.employeeRole(emp.id));
+      const opening = core.newOpening(level, emp.base, emp.allowance, bonus);
+      const employeePk = core.employeePublicKey(emp.id);
       await sleep(pace);
 
       setStep(2);
@@ -675,7 +722,7 @@ function EmployerView({ chain, walletConnected, onConnect, onSetAlert, onNavigat
       const payout = address && summary.budget !== null ? await chain.backend.payEmployee(address, opening.details.net) : null;
       await sleep(pace);
 
-      setResult({ issueTx: issue.txId, payoutTx: payout?.txId, payoutSkipped: chain.mode === 'preprod' && !payout });
+      setResult({ issueTx: issue.txId, payoutTx: payout?.txId, payoutSkipped: chain.mode === 'preprod' && !payout, net: opening.details.net });
       setStep(5);
       setShowSuccess(true);
     } catch (e) {
@@ -714,7 +761,7 @@ function EmployerView({ chain, walletConnected, onConnect, onSetAlert, onNavigat
           <div className="grid grid-cols-2 gap-6">
               <div>
                 <label className="text-[10px] font-black text-slate-500 uppercase mb-3 block tracking-widest">{t.selectEmp}</label>
-                <select className="bg-black/40 border border-white/10 rounded-2xl p-4 w-full text-white outline-none focus:border-blue-500/50 cursor-pointer appearance-none transition-all" value={selectedEmpId} onChange={(e) => setSelectedEmpId(e.target.value)}>
+                <select className="bg-black/40 border border-white/10 rounded-2xl p-4 w-full text-white outline-none focus:border-blue-500/50 cursor-pointer appearance-none transition-all" value={selectedEmpId} onChange={(e) => { setSelectedEmpId(e.target.value); setLevel(EMPLOYEES.find(x => x.id === e.target.value)?.level ?? 0); }}>
                     <option value="">{t.selectAccount}</option>
                     {EMPLOYEES.map(e => <option key={e.id} value={e.id}>{e.name} - {e.title}</option>)}
                 </select>
@@ -731,6 +778,13 @@ function EmployerView({ chain, walletConnected, onConnect, onSetAlert, onNavigat
           {emp && (
             <div className="bg-[#0a0e17] rounded-[2rem] p-8 border border-white/5 animate-in zoom-in slide-in-from-bottom-4 duration-500 shadow-inner">
               <div className="space-y-3 mb-6">
+                <div className="flex justify-between items-center text-sm text-slate-400 font-medium pb-3 border-b border-white/5">
+                  <span>{t.levelLabel}</span>
+                  <select value={level} onChange={e => setLevel(Number(e.target.value))} className="bg-black/60 border border-white/10 rounded-lg px-2 py-1.5 text-white text-xs outline-none">
+                    {LEVEL_NAMES.map((name, i) => <option key={name} value={i + 1}>L{i + 1} · {name}</option>)}
+                  </select>
+                </div>
+                {band && <div className="text-[10px] text-slate-500 font-mono text-right">{t.bandLabel}: {fmt(band.minBase)}–{fmt(band.maxBase)} · {t.allowance} ≤ {fmt(band.maxAllowance)} · {t.bonus} ≤ {fmt(band.maxBonus)}</div>}
                 <div className="flex justify-between text-sm text-slate-400 font-medium"><span>{t.base}</span><span className="text-white font-mono tracking-tight">{emp.base.toLocaleString()}</span></div>
                 <div className="flex justify-between text-sm text-slate-400 font-medium"><span>{t.allowance}</span><span className="text-white font-mono tracking-tight">{emp.allowance.toLocaleString()}</span></div>
                 <div className="flex justify-between items-center text-sm pt-4 border-t border-white/5">
@@ -738,6 +792,7 @@ function EmployerView({ chain, walletConnected, onConnect, onSetAlert, onNavigat
                   <input type="number" min={0} step={1000} value={bonus} onChange={(e) => setBonus(Number(e.target.value))} className={`bg-black/60 border rounded-lg px-3 py-2 text-right text-white w-32 outline-none font-mono ${bonusInvalid ? 'border-red-500/60' : 'border-white/10 focus:border-blue-500/50'}`}/>
                 </div>
                 {bonusInvalid && <div className="text-right text-[11px] text-red-400 font-bold">{t.bonusInvalid}</div>}
+                {bandWarning && <div className="text-right text-[11px] text-amber-400 font-bold flex items-center justify-end gap-1"><ShieldAlert className="w-3.5 h-3.5"/>{bandWarning}</div>}
               </div>
               <div className="space-y-3 border-t border-white/5 pt-6">
                 <div className="flex justify-between text-xs text-red-400/70 font-bold italic"><span>{t.labor}</span><span className="font-mono">-{laborFee.toLocaleString()}</span></div>
@@ -759,6 +814,7 @@ function EmployerView({ chain, walletConnected, onConnect, onSetAlert, onNavigat
         </div>
       </div>
 
+      {chain.mode === 'preprod' && <UnlockKeys chain={chain} role="employer" onError={onSetAlert} t={t} />}
       <ContractPanel chain={chain} summary={summary} period={period} periodU={PERIOD_U} walletConnected={walletConnected} onConnect={onConnect} onError={onSetAlert} canFund t={t} />
       <ReservePanel chain={chain} summary={summary} period={period} periodU={PERIOD_U} onError={onSetAlert} t={t} />
 
@@ -917,6 +973,8 @@ function EmployeeView({ chain, walletConnected, onConnect, onLogin, onSetAlert, 
         <button onClick={onLogout} className="text-xs font-black text-slate-500 hover:text-white border-b-2 border-slate-800 pb-1 uppercase">{t.logout}</button>
       </div>
 
+      {chain.mode === 'preprod' && <UnlockKeys chain={chain} role={`employee:${loginId}`} holder={loginId} onError={onSetAlert} t={t} />}
+
       {chain.mode === 'preprod' && chain.shieldedAddress && (
         <div className="mb-6 text-[10px] font-mono text-slate-500 flex items-center gap-2"><BadgeCheck className="w-3.5 h-3.5 text-emerald-400"/> {t.shieldedRegistered}: {shortHash(chain.shieldedAddress)}</div>
       )}
@@ -1028,11 +1086,23 @@ function AuditorView({ chain, walletConnected, onConnect, onSetAlert, onNavigate
       setIsVerifying(false);
     }, 1200);
     return () => clearTimeout(timer);
-  }, [walletConnected, authSuccess, chain.ledger]);
+  }, [walletConnected, authSuccess, chain.ledger, chain.keystore]);
+
+  // The rules are shared with the auditor only; check them against the on-chain commitment.
+  const [rules, setRules] = useState<any>(null);
+  useEffect(() => {
+    if (!authSuccess || !chain.ledger || !chain.keystore) return;
+    chainCore().then(core => core.readRules(chain.contractAddress, chain.ledger, AUDITOR_HOLDER, chain.keystore)).then(setRules);
+  }, [authSuccess, chain.ledger, chain.keystore, chain.contractAddress]);
 
   const revealed = useOpenings(chain, chain.views, AUDITOR_HOLDER, authSuccess);
   const selectedRecord = chain.views.find(r => r.id === selectedId);
   const selectedReveal = selectedId ? revealed[selectedId] : undefined;
+  const [bandCheck, setBandCheck] = useState<string | null>(null);
+  useEffect(() => {
+    if (!rules?.verified || !selectedReveal) { setBandCheck(null); return; }
+    chainCore().then(core => setBandCheck(core.bandViolation(rules.rules, selectedReveal.opening.details)));
+  }, [rules, selectedReveal]);
 
   const attest = async () => {
     setAttesting(true);
@@ -1112,12 +1182,20 @@ function AuditorView({ chain, walletConnected, onConnect, onSetAlert, onNavigate
           <div className="flex flex-col items-center justify-center py-20 text-red-400">
             <ShieldAlert className="w-16 h-16 mb-6" />
             <p className="font-bold">{t.auditorMismatch}</p>
+            {chain.mode === 'preprod' && <div className="w-full max-w-md text-left"><UnlockKeys chain={chain} role="auditor" holder={AUDITOR_HOLDER} onError={onSetAlert} onUnlocked={() => setAuthDenied(false)} t={t} /></div>}
           </div>
         ) : (
           <div className="space-y-6 relative z-10 animate-in fade-in">
             <div className="flex flex-wrap items-center justify-between gap-4 mb-10">
-              <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-2 w-fit shadow-inner">
-                <BadgeCheck className="w-4 h-4"/> {t.accessGranted}
+              <div className="flex flex-wrap gap-3">
+                <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-2 w-fit shadow-inner">
+                  <BadgeCheck className="w-4 h-4"/> {t.accessGranted}
+                </div>
+                {rules && (
+                  <div className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-2 w-fit border ${rules.verified ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
+                    {rules.verified ? <ShieldCheck className="w-4 h-4"/> : <ShieldAlert className="w-4 h-4"/>} {rules.verified ? t.rulesVerified : t.commitmentBad}
+                  </div>
+                )}
               </div>
               {summary.audited ? (
                 <div className="text-emerald-400 text-xs font-black uppercase tracking-widest flex items-center gap-2"><Stamp className="w-4 h-4"/> {t.attestDone}</div>
@@ -1195,6 +1273,12 @@ function AuditorView({ chain, walletConnected, onConnect, onSetAlert, onNavigate
              <div className="p-10 space-y-5">
                 <div className="flex justify-between text-xs font-black uppercase tracking-widest text-slate-500 border-b border-white/5 pb-3"><span>{t.empId}</span><span className="text-white font-black">{selectedRecord.employeeId ?? shortHash(selectedRecord.employeePk)}</span></div>
                 <div className="flex justify-between text-xs font-black uppercase tracking-widest text-slate-500 border-b border-white/5 pb-3"><span>{t.disbPeriod}</span><span className="text-white">{selectedRecord.period}</span></div>
+                <div className="flex justify-between text-xs font-black uppercase tracking-widest text-slate-500 border-b border-white/5 pb-3"><span>{t.levelLabel}</span>
+                  <span className={bandCheck ? 'text-red-400' : 'text-white'}>
+                    L{String(selectedReveal.opening.details.level)} · {LEVEL_NAMES[Number(selectedReveal.opening.details.level) - 1]}
+                    {rules?.verified && <span className={`ml-2 normal-case tracking-normal ${bandCheck ? 'text-red-400' : 'text-emerald-400'}`}>{bandCheck ? `✗ ${t.outOfBand}` : `✓ ${t.withinBand}`}</span>}
+                  </span>
+                </div>
                 <div className="flex justify-between text-xs font-black uppercase tracking-widest text-slate-500 border-b border-white/5 pb-3"><span>{t.colStatus}</span><span className={selectedRecord.status === 'Claimed' ? 'text-green-400' : 'text-amber-400'}>{statusLabel(selectedRecord.status, t)}</span></div>
                 
                 <div className="pt-6 space-y-3">
